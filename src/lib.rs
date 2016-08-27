@@ -78,6 +78,11 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
                         _ => ()
                     }
                 },
+                (Some(&TokenTree::Token(_, token::Pound)),
+                 Some(&TokenTree::Delimited(..))) => {
+                    i += 2;
+                    continue;
+                }
                 _ => ()
             }
             loop {
@@ -93,7 +98,8 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
     #[derive(Debug)]
     struct Arg<'a> {
         comma: Option<&'a TokenTree>,
-        attrs: &'a [TokenTree],
+        attrs: Vec<TokenTree>,
+        is_default: bool,
         name: Option<&'a ast::Ident>,
         pattern: Option<&'a [TokenTree]>,
         ty: &'a [TokenTree],
@@ -106,17 +112,35 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
         let mut next: &[TokenTree] = &[];
         let mut next_comma: Option<&TokenTree> = None;
         let mut colon_idx: Option<usize> = None;
-        let mut attr_index: usize = 0;
+        let mut attrs: Vec<TokenTree> = Vec::new();
+        let mut is_default: bool = false;
         while let Some(&TokenTree::Token(_, token::Pound)) = this_arg.get(0) {
-            if let Some(&TokenTree::Delimited(_, ref attr_delimed)) = this_arg.get(1) {
+            if let Some(&TokenTree::Delimited(delim_span, ref attr_delimed)) = this_arg.get(1) {
                 if attr_delimed.delim != token::DelimToken::Bracket { break }
                 // ok, this looks like an attr
-                // todo: look for #[default]
-                attr_index += 2;
+                let mut out: Vec<TokenTree> = Vec::new();
+                let comma_split = attr_delimed.tts.split(|a| {
+                    match a { &TokenTree::Token(_, token::Comma) => true, _ => false }
+                });
+                for attr in comma_split {
+                    if let &[TokenTree::Token(_, token::Ident(ref ident))] = attr {
+                        if ident.name.as_str() == "default" {
+                            is_default = true;
+                            continue;
+                        }
+                    }
+                    out.extend_from_slice(attr);
+                }
+                if out.len() != 0 {
+                    attrs.push(this_arg[0].clone());
+                    attrs.push(TokenTree::Delimited(delim_span, Rc::new(Delimited {
+                        tts: out,
+                        ..**attr_delimed
+                    })));
+                }
                 this_arg = &this_arg[2..];
             } else { break }
         }
-        let attrs: &[TokenTree] = &remaining[..attr_index];
         for (i, tt) in this_arg.iter().enumerate() {
             match tt {
                 &TokenTree::Token(_, token::Comma) => {
@@ -141,10 +165,8 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
                     },
                     Some(&TokenTree::Token(underscore_span, token::Underscore)) => {
                         if colon_idx != Some(2) {
-                            if let Some(&TokenTree::Token(_, token::At)) = this_arg.get(2) {} else {
-                                let msg = "underscore not followed by an identifier binding";
-                                cx.span_err(underscore_span, msg);
-                            }
+                            let msg = "underscore not followed by an identifier binding";
+                            cx.span_err(underscore_span, msg);
                         }
                         this_arg = &this_arg[1..];
                         Some(ident2)
@@ -161,14 +183,14 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
                 },
                 _ => (None, this_arg)
             };
-        parsed_out.push(Arg { attrs: attrs, comma: comma, name: name, pattern: pattern, ty: ty });
+        parsed_out.push(Arg { attrs: attrs, is_default: is_default, comma: comma, name: name, pattern: pattern, ty: ty });
         remaining = next;
         comma = next_comma;
     }
     let mutated = mutate_name(fn_name_ident, parsed_out.iter().map(|arg| arg.name));
     let mut replacement_tts: Vec<TokenTree> = Vec::new();
     for (i, arg) in parsed_out.iter().enumerate() {
-        replacement_tts.extend_from_slice(arg.attrs);
+        replacement_tts.extend_from_slice(&arg.attrs[..]);
         if i != 0 { replacement_tts.push(arg.comma.unwrap().clone()); }
         if let Some(pat) = arg.pattern { replacement_tts.extend_from_slice(pat); }
         replacement_tts.extend_from_slice(arg.ty);
