@@ -1,0 +1,9 @@
+[package]
+name = "namedarg"
+version = "0.1.0"
+authors = ["comex <comexk@gmail.com>"]
+
+[dependencies]
+
+[lib]
+crate-type = ["dylib"]
