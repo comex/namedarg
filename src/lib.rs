@@ -191,11 +191,10 @@ fn transform_this_invocation(args: &[TokenTree]) -> (Option<Vec<TokenTree>>, usi
     let mut num_args = 0;
     let mut stuff: Stuff;
     let mut i = 0;
-    let mut next = if let Some(tt) = tts.get(0) { tt } else {
-        return (None, 2)
-    };
     loop {
-        let tt: &TokenTree = next;
+        let tt: &TokenTree = if let Some(tt) = tts.get(i) { tt } else {
+            return (None, 2)
+        };
         if let &TokenTree::Token(_, token::Ident(ref ident)) = tt {
             if let Some(&TokenTree::Token(_, token::Colon)) = tts.get(i+1) {
                 stuff = Stuff {
@@ -209,7 +208,7 @@ fn transform_this_invocation(args: &[TokenTree]) -> (Option<Vec<TokenTree>>, usi
         }
         num_args += 1;
         loop {
-            next = if let Some(tt) = tts.get(i) { tt } else {
+            let next = if let Some(tt) = tts.get(i) { tt } else {
                 return (None, 2)
             };
             i += 1;
@@ -269,8 +268,9 @@ fn transform_tts_direct(args: &[TokenTree]) -> Cow<[TokenTree]> {
         let (x, count) = transform_this(remaining_args);
         if let Some(to_add) = x {
             vec.extend_from_slice(&to_add[..]);
+        } else {
+            vec.extend_from_slice(&remaining_args[..count]);
         }
-        vec.extend_from_slice(&remaining_args[..count]);
         remaining_args = &remaining_args[count..];
     }
 }
