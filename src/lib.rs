@@ -55,6 +55,7 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
         ident
     } else { return (None, 0) };
     if ident.name != keywords::Fn.name() { return (None, 0); }
+    // XXX generics
     let (fn_name_span, fn_name_ident, delimed_span, delimed) =
         if let (Some(&TokenTree::Token(fn_name_span, token::Ident(ref fn_name_ident))),
                 Some(&TokenTree::Delimited(delimed_span, ref delimed))) =
@@ -94,7 +95,7 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
             }
         }
     }
-    if !should_transform { return (None, 3) };
+    if !should_transform { return (None, 3 + generics.len()) };
     #[derive(Debug)]
     struct Arg<'a> {
         comma: Option<&'a TokenTree>,
@@ -102,11 +103,13 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
         is_default: bool,
         name: Option<&'a ast::Ident>,
         pattern: Option<&'a [TokenTree]>,
+        temp_name: Option<ast::Ident>,
         ty: &'a [TokenTree],
     }
     let mut parsed_out: Vec<Arg> = Vec::new();
     let mut remaining = tts;
     let mut comma: Option<&TokenTree> = None;
+    let mut default_count: usize = 0;
     while remaining.len() != 0 {
         let mut this_arg: &[TokenTree] = remaining;
         let mut next: &[TokenTree] = &[];
@@ -126,6 +129,7 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
                     if let &[TokenTree::Token(_, token::Ident(ref ident))] = attr {
                         if ident.name.as_str() == "default" {
                             is_default = true;
+                            default_count += 1;
                             continue;
                         }
                     }
@@ -187,7 +191,79 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
         remaining = next;
         comma = next_comma;
     }
-    let mutated = mutate_name(fn_name_ident, parsed_out.iter().map(|arg| arg.name));
+    let mut replacement: Vec<TokenTree> = Vec::new();
+    let mutated_full = mutate_name(fn_name_ident, parsed_out.iter().map(|arg| arg.name));
+    if default_count != 0 {
+        let mut i = parsed_out.len();
+        let fake_span: Span = ..;
+        let none: ast::Ident = Ident::with_empty_ctxt(token::Intern("None"));
+        while default_count != 0 {
+            loop {
+                i -= 1;
+                if parsed_out[i].is_default { break; }
+            }
+            i -= 1;
+            default_count -= 1;
+            let mutated = mutate_name(fn_name_ident, parsed_out[..i].iter().map(|arg| arg.name));
+
+            replacement.push(TokenTree::Token(fake_span, token::Ident(keywords::Fn.ident()))); // fn
+            replacement.push(TokenTree::Token(fake_span, token::Ident(mutated))); // name
+            replacement.extend_from_slice(generics); // <...>
+            let mut arg_tts: Vec<TokenTree> = Vec::new();
+            for (j, arg) in parsed_out[..i].iter_mut().enumerate() {
+                arg_tts.extend_from_slice(&arg.attrs[..]);
+                if j != 0 { arg_tts.push(arg.comma.unwrap().clone()); }
+                if arg.temp_name.is_none() {
+                    arg.temp_name = Some(if let Some(ref ident) = arg.name {
+                            ident.clone()
+                        } else {
+                            Ident::with_empty_ctxt(token::intern(&format!("arg{}", j)))
+                        });
+                }
+                replacement.push(TokenTree::Token(fake_span, token::Ident(arg.temp_name.unwrap())));
+                replacement.push(TokenTree::Token(fake_span, token::Colon));
+                arg_tts.extend_from_slice(arg.ty);
+            }
+            replacement.push(TokenTree::Delimited(fake_span, Rc::new(Delimited { // (...)
+                delim: token::DelimToken::Paren,
+                open_span: fake_span,
+                tts: arg_tts,
+                close_span: fake_span,
+            })));
+            // XX return type
+
+            // body
+            let mut body_tts: Vec<TokenTree> = Vec::new();
+            // XX <Self as TraitName>::
+            body_tts.push(TokenTree::Token(fake_span, token::Ident(mutated_full.clone())));
+            let mut recall_tts: Vec<TokenTree> = Vec::new();
+            for (j, arg) in parsed_out.iter().enumerate() {
+                let the_ident = if j < i {
+                    arg.temp_name.as_ref().unwrap().clone()
+                } else {
+                    none_ident.clone();
+                }
+                if j != 0 {
+                    body_tts.push(TokenTree::Token(fake_span, token::Comma));
+                }
+                body_tts.push(TokenTree::Token(fake_span, token::Ident(the_ident));
+            }
+            body_tts.push(TokenTree::Delimited(fake_span, Rc::new(Delimited {
+                delim: token::DelimToken::Paren,
+                open_span: fake_span,
+                tts: recall_tts,
+                close_span: fake_span,
+            })));
+
+            replacement.push(TokenTree::Delimited(fake_span, Rc::new(Delimited {
+                delim: token::DelimToken::Brace,
+                open_span: fake_span,
+                tts: body_tts,
+                close_span: fake_span,
+            })));
+
+        }
+    }
     let mut replacement_tts: Vec<TokenTree> = Vec::new();
     for (i, arg) in parsed_out.iter().enumerate() {
         replacement_tts.extend_from_slice(&arg.attrs[..]);
@@ -195,16 +271,15 @@ fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenT
         if let Some(pat) = arg.pattern { replacement_tts.extend_from_slice(pat); }
         replacement_tts.extend_from_slice(arg.ty);
     }
-    let replacement = vec![
-        args[0].clone(), // fn
-        TokenTree::Token(fn_name_span, token::Ident(mutated)),
-        TokenTree::Delimited(delimed_span, Rc::new(Delimited {
-            tts: replacement_tts,
-            ..*delimed
-        }))
-    ];
+    replacement.push(args[0].clone()); // fn
+    replacement.push(TokenTree::Token(fn_name_span, token::Ident(mutated_full))); // name
+    replacement.extend_from_slice(generics);
+    replacement.push(TokenTree::Delimited(delimed_span, Rc::new(Delimited {
+        tts: replacement_tts,
+        ..*delimed
+    })));
 
-    (Some(replacement), 3)
+    (Some(replacement), 3 + generics.len())
 }
 
 fn transform_this_invocation(args: &[TokenTree]) -> (Option<Vec<TokenTree>>, usize) {
