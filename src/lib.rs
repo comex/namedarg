@@ -140,50 +140,6 @@ impl<'a> TTReader<'a> {
     }
 }
 
-fn skip_past_closing_angle_bracket(tr: &mut TTReader) -> bool /*ok*/ {
-    let mut level: usize = 1;
-    let mut delim_depth: usize = 0;
-    let mark = tr.mark_last();
-    while let Some(st) = tr.next() {
-        match st.token {
-            &token::Lt => {
-                level += 1;
-            },
-            &token::Gt => {
-                level -= 1;
-                if level == 0 {
-                    if delim_depth > 0 {
-                        while delim_depth > 0 {
-                            tr.force_pop();
-                            delim_depth -= 1;
-                        }
-                        tr.reset_to(mark);
-                        return false;
-                    }
-                    return true;
-                }
-            },
-            &token::OpenDelim(_) => {
-                if st.is_stack {
-                    delim_depth += 1;
-                }
-            },
-            &token::CloseDelim(_) => {
-                if st.is_stack {
-                    if delim_depth == 0 {
-                        tr.force_repush();
-                        tr.reset_to(mark);
-                        return false;
-                    }
-                    delim_depth -= 1;
-                }
-            },
-            _ => ()
-        }
-    }
-    false
-}
-
 struct Context<'a> {
     cx: &'a mut ExtCtxt
 }
@@ -191,28 +147,34 @@ struct Context<'a> {
 fn do_transform<'a>(args: &'a [TokenTree], ctx: &mut Context) {
     enum State<'a> {
         Null,
-        GotIdent,
-        GotIdentColon,
+        GotIdent(Mark),
+        StructLiteralStart,
+        GotIdentColonColon(Mark),
+        GotIdentColonColonGenerics { name: Mark, generic_start: Mark },
         GotFn,
-        GotFnName,
+        GotFnName { name: Mark, generic_start: Option<Mark>, generic_end: Option<Mark> },
         CallArgStart(CallStuff<'a>),
         DeclArgStart,
-        MidType { angle_depth: usize, delim_depth: usize },
+        MidType { angle_depth: usize },
+    }
+    struct StackEntry {
+        state: State<'a>,
+        comma_return: Option<State<'a>>,
+        delim_depth: usize,
     }
     struct CallStuff<'a> {
         name: Mark,
         generic_start_end: Option<(Mark, Mark)>,
-        delim_depth: usize,
         args: Vec<Option<Ident>>,
     }
     struct Stuff<'a> {
-        state: State,
-        tr: TTReader<'a>,
-        stack: Vec<State<'a>>,
-        generic_start: Mark,
-        generic_end: Mark,
-        name: Option<(&Span, &Ident)>,
+        state: State<'a>,
+        comma_return: Option<State<'a>>,
         delim_depth: usize,
+        tr: TTReader<'a>,
+        stack: Vec<(usize /*delim_depth*/, State<'a>)>,
+        generic_start: Option<Mark>,
+        generic_end: Mark,
         decl_have_generic: bool,
     }
     let mut stuff: Stuff<'a> = {
@@ -228,161 +190,198 @@ fn do_transform<'a>(args: &'a [TokenTree], ctx: &mut Context) {
         () => ( if let Some(st) = s.tr.next(&s.token_storage) { st } else { break } )
     }
     #[inline(always)]
+    fn push<'a>(s: &mut Stuff<'a>, state: State<'a>) {
+        s.stack.push(StackEntry { state: state, comma_return: s.comma_return, delim_depth: s.delim_depth });
+        s.comma_return = None;
+        s.delim_depth = 0;
+    }
+    #[inline(always)]
+    fn pop<'a>(s: &mut Stuff<'a>) {
+        let (delim_depth, state) = s.stack.pop().unwrap();
+        s.delim_depth = delim_depth
+        s.state = state;
+    }
+    #[inline(always)]
     fn do_null(st: SpanToken<'a>, s: &mut Stuff) {
-        if let &token::Ident(ref ident) = st.token {
-            // XXX trait, attr
-            if ident.name == keywords::Fn.name() {
-                s.state = State::GotFn;
-            } else {
-                s.name = s.tr.mark_last();
-                s.state = State::GotIdent;
-            }
-        } else if s.delim_depth != 0 {
-            match st.token {
-                &token::OpenDelim(_) => {
-                    s.delim_depth += 1;
-                },
-                &token::CloseDelim(_) => {
+        match st.token {
+            &token::Ident(ref ident) => {
+                // XXX trait, attr
+                if ident.name == keywords::Fn.name() {
+                    s.state = State::GotFn;
+                } else {
+                    s.name = s.tr.mark_last();
+                    s.state = State::GotIdent;
+                }
+            },
+            &token::OpenDelim(_) => {
+                s.delim_depth += 1;
+            },
+            &token::CloseDelim(_) => {
+                if s.delim_depth == 0 {
+                    pop(s);
+                } else {
                     s.delim_depth -= 1;
-                    if s.delim_depth == 0 {
-                        pop_call_stack(s);
+                }
+            },
+            &token::Comma => {
+                if s.delim_depth == 0 {
+                    if let Some(state) = s.comma_return {
+                        s.state = state;
+                        s.comma_return = State::Null;
                     }
-                },
-                &token::Comma => {
-                    if s.delim_depth == 1 {
-                        s.state = State::CallArgStart;
-                    }
-                },
-            }
+                }
+            },
+            &token::Colon => {
+                s.state = State::MidType;
+            },
         }
     }
     #[inline(always)]
-    fn do_ident<'a>(st: SpanToken<'a>, s: &mut Stuff<'a>) {
+    fn do_got_ident<'a>(st: SpanToken<'a>, s: &mut Stuff<'a>, name: Mark, generic_start_end: Option<(Mark, Mark)>) {
         match st.token {
             &token::ModSep => {
-                s.state = State::GotIdentColon;
+                s.state = State::GotIdentColonColon;
             },
             &token::OpenDelim(DelimToken::Paren) => {
-                s.state = State::CallArgStart;
+                push(s, State::Null);
+                s.state = State::CallArgStart(CallStuff {
+                    name: name;
+                    generic_start_end: generic_start_end,
+                    args: Vec::new(),
+                });
+            },
+            &token::OpenDelim(DelimToken::Brace) => {
+                push(s, State::Null);
+                s.state = State::StructLiteral;
             },
             _ => do_null(st, s),
         }
     },
-    #[inline(always)]
-    fn do_generic<'a>(s: &mut Stuff<'a>) -> bool {
-        // this really should be a type
-        s.generic_start = s.tr.mark();
-        let ok = skip_past_closing_angle_bracket(s.tr);
-        if !ok {
-            // confusing...
-            s.state = State::Null;
-            return false;
-        }
-        s.generic_end = s.tr.mark();
-        let open_paren_st = st_or_break!();
-        if let &token::OpenDelim(DelimToken::Paren) = open_paren_st.token {
-            true
-        } else {
-            // taking a pointer to the function? should be uncommon
-            s.tr.copy_from(generic_end);
-            s.state = State::Null;
-            false
-        }
-    }
     loop {
         match state {
             State::Null => do_null(st_or_break!(), &mut s),
-            State::GotIdent => do_ident(st_or_break!(), &mut s),
-            State::GotIdentColon => {
+            State::GotIdent(name) => do_got_ident(st_or_break!(), &mut s, name, None),
+            State::StructLiteralStart { after_ident } => {
+                let st = st_or_break!();
+                match st.token {
+                    &token::CloseDelim(DelimToken::Brace) => pop(s),
+                    &token::Ident(ref ident) => (),
+                    &token::DotDot | &token::Colon => {
+                        s.state = State::Null;
+                    },
+                    _ => {
+                        cx.span_err(st.span, "unexpected token in struct literal. possible parser bug");
+                        s.state = State::Null;
+                    },
+                }
+            },
+            State::GotIdentColonColon(name) => {
                 let st = st_or_break!();
                 match st.token {
                     &token::Lt => {
-                        if do_generic(&mut s) {
-                            s.call_stack.push(CallStuff {
-                                name: name,
-                                generic_start_end: (generic_start, generic_end),
-                            });
-                            s.generic_start = Mark::dummy();
-                            s.generic_end = Mark::dummy();
-                            s.state = State::CallArgStart;
-                        }
+                        push(s, State::GotIdentColonColonGenerics { name: name, generic_start: s.mark_last() });
+                        s.state = State::MidType { angle_depth: 1 };
                     },
                     _ => do_null(st, &mut s),
                 }
             },
+            State::GotIdentColonColonGenerics { name, generic_start } => {
+                let generic_end = s.mark_last();
+                do_got_ident(st_or_break!(), &mut s, name, Some((generic_start, generic_end)))
+            }
             State::GotFn => {
                 let st = st_or_break!();
                 match st.token {
                     &token::Ident(ref ident) => {
-                        s.name = s.tr.mark_last_rw();
-                        s.state = State::GotFnName;
+                        s.state = State::GotFnName(s.tr.mark_last());
+                        s.generic_start = None;
                     },
                     _ => do_null(st, &mut state),
                 }
             },
-            State::GotFnName => {
+            State::GotFnName(name) => {
                 let st = st_or_break!();
                 match st.token {
                     &token::Lt => {
-                        if do_generic(&mut s) {
-                            s.decl_have_generic = true;
-                            s.state = State::DeclArgStart;
-                        }
+                        s.stack.push(State::GotFnName);
+                        s.state = State::MidType { angle_depth: 1 };
+                        s.generic_start = Some(st.mark());
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
-                        s.decl_have_generic = false;
                         s.state = State::DeclArgStart;
                     },
                     _ => do_null(st, &mut s),
                 }
             },
-            State::CallArgStart => {
+            State::CallArgStart(ref mut call) => {
                 let st = st_or_break!();
                 if let &token::Ident(ref ident) = st.token {
-                    let mark = s.tr.mark_last_rw();
+                    let mark = s.tr.mark_last();
                     let st2 = st_or_break!();
                     if let &token::Colon = st2.token {
-                        let last = s.call_stack.last_mut().unwrap();
-                        last.args.push(Some(ident));
+                        call.args.push(Some(ident));
                         s.tr.delete_from_mark(mark);
                         state = State::Null;
                     } else {
-                        {
-                            let last = s.call_stack.last_mut().unwrap();
-                            last.args.push(None);
-                        }
+                        call.args.push(None);
                         s.name = (st.span, indent);
-                        do_ident(st2, &mut s);
+                        do_got_ident(st2, &mut s);
                     },
                 } else {
-                    {
-                        let last = s.call_stack.last_mut().unwrap();
-                        last.args.push(None);
-                    }
+                    call.args.push(None);
                     do_null(st, &mut s);
                 }
             },
-            State::MidType { ref mut angle_depth, ref mut delim_depth } => {
+            State::MidType { ref mut angle_depth } => {
                 let st = st_or_break!();
                 match st.token {
-                if let &token::Ident(ref ident) = st.token {
                     &token::Lt => {
                         *angle_depth += 1;
                     },
                     &token::Gt => {
-                        *angle_depth -= 1;
                         if *angle_depth == 0 {
-                            
+                            cx.span_err(st.span, "'>' without '<'. possible parser bug");
 
                         }
+                        *angle_depth -= 1;
+                        if *angle_depth == 0 {
+                            if s.delim_depth > 0 {
+                                cx.span_err(st.span, "unexpected '>' misnested w.r.t. ()[]{}. possible parser bug");
+                                while s.delim_depth > 0 {
+                                    s.tr.force_pop();
+                                    s.delim_depth -= 1;
+                                }
+                            }
+                            state = s.state_stack.pop().unwrap();
+                        }
+                    },
+                    &token::Comma => {
+
                     },
                     &token::Semi => {
                         // only valid inside an array decl, puts us into expression context
-                        s.stack.push(State::MidType { angle_depth: angle_depth, delim_depth: delim_depth });
+                        // decrease delim_depth because the pop will come due to a closing delim
+                        let new_delim_depth = if *delim_depth == 0 { 0 } else { *delim_depth - 1 };
+                        push(s, State::MidType { angle_depth: *angle_depth, delim_depth: new_delim_depth });
                         s.state = State::Null;
                     },
-
-            
+                    &token::OpenDelim(_) => {
+                        if st.is_stack {
+                            *delim_depth += 1;
+                        }
+                    },
+                    &token::CloseDelim(_) => {
+                        if st.is_stack {
+                            if *delim_depth == 0 {
+                                // similar
+                                cx.span_err(st.span, "unexpected thingy [todo]. possible parser bug");
+                                // act as if we got a >
+                                state = s.state_stack.pop().unwrap();
+                            }
+                            *delim_depth -= 1;
+                        }
+                    },
+                }
             }
         }
 
