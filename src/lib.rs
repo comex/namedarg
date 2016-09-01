@@ -11,6 +11,7 @@ use syntax_pos::Span;
 use syntax::ast;
 use syntax::ast::Ident;
 use syntax::util::small_vector::SmallVector;
+use syntax::print::pprust;
 use rustc_plugin::registry::Registry;
 //use syntax::parse::parser::Parser;
 use syntax::parse::token;
@@ -62,6 +63,7 @@ struct TTReader<'a> {
     stack: Vec<(&'a [TokenTree], &'a [TokenTree], Option<Vec<TokenTree>>)>,
     whole: &'a [TokenTree],
     cur: &'a [TokenTree],
+    cur_offset: usize,
     output: Option<Vec<TokenTree>>,
     token_storage: &'a UnsafeCell<Token>,
 }
@@ -76,9 +78,10 @@ type MarkCurStackDepth = ();
 fn make_cur_stack_depth(_: usize) -> MarkCurStackDepth { () }
 
 #[derive(Copy, Clone)]
+#[derive(Debug)]
 struct Mark {
     cur_stack_depth: MarkCurStackDepth,
-    cur_len: usize,
+    cur_offset: usize,
 }
 /*
 impl Mark {
@@ -94,8 +97,16 @@ impl<'a> TTReader<'a> {
             stack: Vec::new(),
             whole: initial,
             cur: initial,
+            cur_offset: 0,
             output: None,
             token_storage: token_storage,
+        }
+    }
+    fn output_as_slice(&self) -> &[TokenTree] {
+        if let Some(ref output) = self.output {
+            &output[..]
+        } else {
+            self.whole
         }
     }
     fn next<'b, 'x>(&'x mut self) -> Option<SpanToken<'a>> {
@@ -107,6 +118,7 @@ impl<'a> TTReader<'a> {
                     let span: &'a Span = span;
                     let token: &'a Token = token;
                     self.cur = &self.cur[1..];
+                    self.cur_offset += 1;
                     if let Some(ref mut output) = self.output {
                         output.push(tok.clone());
                     }
@@ -122,6 +134,7 @@ impl<'a> TTReader<'a> {
                         replace(&mut self.output, None),
                     );
                     self.stack.push(p);
+                    self.cur_offset = 0;
                     unsafe {
                         let ptr = self.token_storage.get();
                         *ptr = token::OpenDelim(delimed.delim);
@@ -142,13 +155,17 @@ impl<'a> TTReader<'a> {
                             tts: tts,
                             ..**delimed
                         })));
+                        self.cur_offset = output.len();
                     } else if let Some(tts) = old_output {
-                        let mut new_output = self.whole[..self.offset_in_whole()].to_owned();
+                        let mut new_output = self.whole[..self.offset_in_whole()-1].to_owned();
                         new_output.push(TokenTree::Delimited(span.clone(), Rc::new(Delimited {
                             tts: tts,
                             ..**delimed
                         })));
+                        self.cur_offset = new_output.len();
                         self.output = Some(new_output);
+                    } else {
+                        self.cur_offset = self.whole.len() - self.cur.len();
                     }
                     unsafe {
                         let ptr = self.token_storage.get();
@@ -164,25 +181,55 @@ impl<'a> TTReader<'a> {
         }
     }
     fn mark_last(&self) -> Mark {
-        Mark { cur_len: self.cur.len() + 1, cur_stack_depth: make_cur_stack_depth(self.stack.len()) }
+        Mark {
+            cur_offset: self.cur_offset - 1,
+            cur_stack_depth: make_cur_stack_depth(self.stack.len())
+        }
     }
     fn force_pop(&mut self) {
         let (pwhole, pcur, poutput) = self.stack.pop().expect("force_pop");
         self.whole = pwhole;
         self.cur = pcur;
         self.output = poutput;
+        if let Some(ref output) = self.output {
+            self.cur_offset = output.len();
+        } else {
+            self.cur_offset = self.whole.len() - self.cur.len();
+        }
     }
     fn offset_in_whole(&self) -> usize {
         self.whole.len() - self.cur.len()
     }
-    fn delete_from_mark(&mut self, mark: Mark) {
+    fn delete_from_mark(&mut self, mark: Mark, count: usize) {
+        println!("dfm({})", count);
         self.check_mark(mark);
-        let offset = self.whole.len() - mark.cur_len;
+        let offset = mark.cur_offset;
+        let cur_offset = self.cur_offset;
         if let Some(ref mut output) = self.output {
-            output.truncate(offset);
+            println!("dfm: old ({:?})", output);
+            println!("offset = {} len = {}", offset, output.len());
+            for _ in 0..count {
+                output.remove(offset);
+            }
+            self.cur_offset = output.len();
         } else {
-            self.output = Some(self.whole[..offset].to_owned());
+            println!("dfm: new");
+            let mut vec = self.whole[..offset].to_owned();
+            vec.extend_from_slice(&self.whole[offset+count..cur_offset]);
+            self.cur_offset = vec.len();
+            self.output = Some(vec);
         }
+        println!("dfm: now we look like {}", pprust::tts_to_string(self.output.as_ref().unwrap()));
+        println!("...cur is {}", pprust::tts_to_string(self.cur));
+    }
+    fn mutate_mark(&mut self, mark: Mark) -> &mut TokenTree {
+        self.check_mark(mark);
+        let offset = mark.cur_offset;
+        let cur_offset = self.cur_offset;
+        if self.output.is_none() {
+            self.output = Some(self.whole[..cur_offset].to_owned());
+        }
+        &mut self.output.as_mut().unwrap()[offset]
     }
     #[cfg(debug_assertions)]
     fn check_mark(&self, mark: Mark) {
@@ -196,44 +243,48 @@ struct Context<'x, 'y: 'x> {
     cx: &'x mut ExtCtxt<'y>
 }
 
-fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell<Token>, ctx: &mut Context<'x, 'y>) {
+fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>) {
+    #[derive(Debug)]
     enum State {
         Null,
         GotIdent(Mark),
-        StructLiteralStart,
         GotIdentColonColon(Mark),
         GotFn,
         GotFnName { name: Mark, generic_start: Option<Mark> },
         CallArgStart(CallStuff),
         DeclArgStart(DeclStuff),
-        MidType { angle_depth: usize },
+        SeekingMatchingAngleBracket { angle_depth: usize },
+        Dummy,
     }
     struct StackEntry {
         state: State,
         comma_return: Option<State>,
         delim_depth: usize,
     }
+    #[derive(Debug)]
     struct CallStuff {
         name: Mark,
         args: Vec<Option<Ident>>,
     }
+    #[derive(Debug)]
     struct DeclStuff {
+        name: Mark,
         generic_start_end: Option<(Mark, Mark)>,
         args: Vec<Option<Ident>>,
     }
-    struct Stuff<'a, 'x, 'y: 'x, 'z: 'y> {
+    struct Stuff<'x, 'y: 'x, 'z: 'y, 'a: 'x> {
         ctx: &'x mut Context<'y, 'z>,
         state: State,
         comma_return: Option<State>,
         delim_depth: usize,
-        tr: TTReader<'a>,
+        tr: &'x mut TTReader<'a>,
         stack: Vec<StackEntry>,
     }
     let mut s: Stuff = Stuff {
         state: State::Null,
         comma_return: None,
         delim_depth: 0,
-        tr: TTReader::new(args, token_storage),
+        tr: tr,
         stack: Vec::new(),
         ctx: ctx,
     };
@@ -257,29 +308,14 @@ fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell
             continue;
         }}
     }
-    macro_rules! continue_next_movecr {
-        ($state:expr) => {{
-            let new: State = $state;
-            unsafe { s.comma_return = Some(replace(&mut *xsp, new)); }
-            st = st_or_return!();
-            continue;
-        }}
-    }
-    macro_rules! continue_same_movecr {
-        ($state:expr) => {{
-            let new: State = $state;
-            unsafe { s.comma_return = Some(replace(&mut *xsp, new)); }
-            continue;
-        }}
-    }
     #[inline(always)]
-    fn push<'a, 'x, 'y, 'z>(s: &mut Stuff<'a, 'x, 'y, 'z>, state: State) {
+    fn push<'x, 'y, 'z, 'a>(s: &mut Stuff<'x, 'y, 'z, 'a>, state: State) {
         s.stack.push(StackEntry { state: state, comma_return: replace(&mut s.comma_return, None), delim_depth: s.delim_depth });
         s.comma_return = None;
         s.delim_depth = 0;
     }
     #[inline(always)]
-    fn pop<'a, 'x, 'y, 'z>(s: &mut Stuff<'a, 'x, 'y, 'z>) {
+    fn pop<'x, 'y, 'z, 'a>(s: &mut Stuff<'x, 'y, 'z, 'a>) {
         if let Some(entry) = s.stack.pop() {
             s.delim_depth = entry.delim_depth;
             s.state = entry.state;
@@ -293,7 +329,10 @@ fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell
     }
     st = st_or_return!();
     loop {
-        match s.state {
+        s.ctx.cx.span_warn(*st.span, "hi");
+        println!("state={:?} cr={:?}", s.state, s.comma_return);
+        println!("depth={} dd={} tok={:?}", s.tr.stack.len(), s.delim_depth, st.token);
+        match replace(&mut s.state, State::Dummy) {
             State::Null => {
                 match st.token {
                     &token::Ident(ref ident) => {
@@ -322,16 +361,14 @@ fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell
                     &token::Comma => {
                         if s.delim_depth == 0 {
                             if let Some(state) = s.comma_return {
-                                s.state = state;
                                 s.comma_return = None;
+                                continue_next!(state);
                             }
                         }
                     },
-                    &token::Colon => {
-                        continue_next!(State::MidType { angle_depth: 0 });
-                    },
-                    _ => continue_next!(State::Null),
+                    _ => (),
                 }
+                continue_next!(State::Null);
             },
             State::GotIdent(name) => {
                 match st.token {
@@ -345,24 +382,7 @@ fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell
                             args: Vec::new(),
                         }));
                     },
-                    &token::OpenDelim(DelimToken::Brace) => {
-                        push(&mut s, State::Null);
-                        continue_next!(State::StructLiteralStart);
-                    },
                     _ => {
-                        continue_same!(State::Null);
-                    },
-                }
-            },
-            State::StructLiteralStart => {
-                match st.token {
-                    &token::CloseDelim(DelimToken::Brace) => pop(&mut s),
-                    &token::Ident(_) => (),
-                    &token::DotDot | &token::Colon => {
-                        continue_next!(State::Null);
-                    },
-                    _ => {
-                        s.ctx.cx.span_err(*st.span, "unexpected token in struct literal. possible parser bug");
                         continue_same!(State::Null);
                     },
                 }
@@ -371,7 +391,7 @@ fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell
                 match st.token {
                     &token::Lt => {
                         push(&mut s, State::GotIdent(name));
-                        continue_next!(State::MidType { angle_depth: 1 });
+                        continue_next!(State::SeekingMatchingAngleBracket { angle_depth: 1 });
                     },
                     _ => continue_same!(State::Null),
                 }
@@ -384,15 +404,17 @@ fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell
                     _ => continue_same!(State::Null),
                 }
             },
-            State::GotFnName {name, generic_start } => {
+            State::GotFnName { name, generic_start } => {
                 match st.token {
                     &token::Lt => {
                         let state = State::GotFnName { name: name, generic_start: Some(s.tr.mark_last()) };
                         push(&mut s, state);
-                        continue_next!(State::MidType { angle_depth: 1 });
+                        continue_next!(State::SeekingMatchingAngleBracket { angle_depth: 1 });
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
+                        push(&mut s, State::Null);
                         continue_next!(State::DeclArgStart(DeclStuff {
+                            name: name,
                             generic_start_end: if let Some(start) = generic_start {
                                 Some((start, s.tr.mark_last()))
                             } else { None },
@@ -402,36 +424,51 @@ fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell
                     _ => continue_same!(State::Null),
                 }
             },
-            State::CallArgStart(ref mut call) => {
+            State::CallArgStart(mut call) => {
                 match st.token {
                     &token::Ident(ref ident) => {
                         let mark = s.tr.mark_last();
                         let st2 = st_or_return!();
                         if let &token::Colon = st2.token {
                             call.args.push(Some(*ident));
-                            s.tr.delete_from_mark(mark);
-                            continue_next_movecr!(State::Null);
+                            s.tr.delete_from_mark(mark, 2);
+                            s.comma_return = Some(State::CallArgStart(call));
+                            continue_next!(State::Null);
                         } else {
                             call.args.push(None);
-                            continue_same_movecr!(State::GotIdent(s.tr.mark_last()));
+                            s.comma_return = Some(State::CallArgStart(call));
+                            continue_same!(State::GotIdent(s.tr.mark_last()));
                         }
                     },
                     &token::CloseDelim(_) => {
-                        println!("closedelim: {:?}", call.args);
-                        continue_next!(State::Null);
+                        //println!("call closedelim: {:?}", call.args);
+                        if call.args.iter().any(|arg| arg.is_some()) {
+                            let name = s.tr.mutate_mark(call.name);
+                            match *name {
+                                TokenTree::Token(_, token::Ident(ref mut ident)) => {
+                                    let new_name = mutate_name(ident, call.args.iter().map(|arg| arg.as_ref()));
+                                    *ident = new_name;
+                                },
+                                _ => unreachable!(),
+                            }
+                        }
+                        pop(&mut s);
                     },
                     _ => {
                         call.args.push(None);
-                        continue_same_movecr!(State::Null);
+                        s.comma_return = Some(State::CallArgStart(call));
+                        continue_same!(State::Null);
                     }
                 }
             },
-            State::DeclArgStart(ref mut decl) => {
+            State::DeclArgStart(mut decl) => {
                 match st.token {
                     &Token::Underscore | &token::Ident(_) => {
+                        let to_delete = s.tr.mark_last();
                         let st2 = st_or_return!();
                         match st2.token {
                             &token::Ident(ident2) => {
+                                s.tr.delete_from_mark(to_delete, 1);
                                 match st.token {
                                     &token::Ident(ident1) => {
                                         decl.args.push(Some(ident1));
@@ -451,25 +488,39 @@ fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell
                                 decl.args.push(None);
                             },
                         }
-                        continue_same_movecr!(State::MidType { angle_depth: 0 });
+                        s.comma_return = Some(State::DeclArgStart(decl));
+                        continue_same!(State::Null);
+                    },
+                    &token::CloseDelim(_) => {
+                        println!("decl closedelim: {:?}", decl.args);
+                        if decl.args.iter().any(|arg| arg.is_some()) {
+                            let name = s.tr.mutate_mark(decl.name);
+                            match *name {
+                                TokenTree::Token(_, token::Ident(ref mut ident)) => {
+                                    *ident = mutate_name(ident, decl.args.iter().map(|arg| arg.as_ref()));
+                                },
+                                _ => unreachable!(),
+                            }
+                        }
+                        pop(&mut s);
                     },
                     _ => {
                         decl.args.push(None);
-                        continue_same_movecr!(State::MidType { angle_depth: 0 });
+                        s.comma_return = Some(State::DeclArgStart(decl));
+                        continue_same!(State::Null);
                     },
                 }
             },
-            State::MidType { mut angle_depth } => {
+            State::SeekingMatchingAngleBracket { mut angle_depth } => {
                 match st.token {
                     &token::Lt => {
-                        s.state = State::MidType { angle_depth: angle_depth + 1 };
+                        angle_depth += 1;
                     },
                     &token::Gt => {
                         if angle_depth == 0 {
                             s.ctx.cx.span_err(*st.span, "'>' without '<'. possible parser bug");
                         } else {
                             angle_depth -= 1;
-                            s.state = State::MidType { angle_depth: angle_depth };
                         }
                         if angle_depth == 0 {
                             if s.delim_depth > 0 {
@@ -492,12 +543,8 @@ fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell
                     },
                     &token::Semi => {
                         // only valid inside an array decl, puts us into expression context
-                        push(&mut s, State::MidType { angle_depth: angle_depth });
-                        s.state = State::Null;
-                    },
-                    &token::OpenDelim(DelimToken::Brace) => {
-                        push(&mut s, State::Null);
-                        continue_next!(State::StructLiteralStart);
+                        push(&mut s, State::SeekingMatchingAngleBracket { angle_depth: angle_depth });
+                        continue_next!(State::Null);
                     },
                     &token::OpenDelim(_) => {
                         s.delim_depth += 1;
@@ -513,9 +560,11 @@ fn do_transform<'a, 'x, 'y>(args: &'a [TokenTree], token_storage: &'a UnsafeCell
                             pop(&mut s);
                         }
                     },
-                    _ => continue_next!(State::MidType { angle_depth: angle_depth }),
+                    _ => ()
                 }
-            }
+                continue_next!(State::SeekingMatchingAngleBracket { angle_depth: angle_depth });
+            },
+            State::Dummy => unreachable!(),
         }
         st = st_or_return!();
     }
@@ -903,9 +952,13 @@ fn transform_tts<'a>(args: &'a [TokenTree], cx: &mut ExtCtxt) -> Cow<'a, [TokenT
 
 fn expand_namedarg<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree])
         -> Box<MacResult + 'static> {
+    let token_storage = UnsafeCell::new(token::DotDot);
+    let mut tr = TTReader::new(args, &token_storage);
     let mut ctx = Context { cx: cx };
-    do_transform(args, &UnsafeCell::new(token::DotDot), &mut ctx);
-    passthrough_items(ctx.cx, args)
+    do_transform(&mut tr, &mut ctx);
+    let output = tr.output_as_slice();
+    println!("==> {}", pprust::tts_to_string(output));
+    passthrough_items(ctx.cx, output)
 }
 
 
