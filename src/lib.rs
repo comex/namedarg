@@ -1,4 +1,4 @@
-#![feature(plugin_registrar, rustc_private, slice_patterns)]
+#![feature(plugin_registrar, rustc_private, slice_patterns, relaxed_adts)]
 
 #[macro_use]
 extern crate syntax;
@@ -53,6 +53,67 @@ fn mutate_name<'a, I>(fn_name_ident: &ast::Ident, arg_names: I) -> ast::Ident
     ast::Ident { name: token::intern(&name), ctxt: fn_name_ident.ctxt }
 }
 
+struct TTWriter<'x, 'a: 'x> {
+    tr: &'x mut TTReader<'a>,
+    output_stack: Vec<Vec<TokenTree>>,
+    orig_output_
+    output: Vec<TokenTree>,
+    span: Span,
+}
+
+impl<'x, 'a: 'x> TTWriter<'x, 'a> {
+    fn write(&mut self, tok: Token) {
+        match tok {
+            token::OpenDelim(_) => {
+                self.output_stack.push(replace(&mut self.output, Vec::new()));
+            },
+            token::CloseDelim(delim) => {
+                self.output.push(TokenTree::Delimited(self.span, Rc::new(Delimited {
+                    delim: delim,
+                    open_span: self.span,
+                    tts: self.output_stack.pop().unwrap(),
+                    close_span: self.span,
+                })));
+            },
+            _ => {
+                self.output.push(TokenTree::Token(self.span, tok));
+            },
+        }
+    }
+    fn get(&self, start: Mark, end: Mark) -> &[TokenTree] {
+        assert_eq!(start.cur_stack_depth, self.tr.stack.len());
+        assert_eq!(end.cur_stack_depth, self.tr.stack.len());
+        let (start, end) = (start.cur_offset, end.cut_offset);
+        let cutoff = 
+
+
+    }
+    fn copy_from_mark_range(&mut self, enter: Option<Mark>, start: Mark, end: Mark) {
+        let to_add: Vec<TokenTree> = {
+            let x: &[TokenTree] = if let Some(enter) = enter {
+                assert_eq!(start.cur_stack_depth, self.tr.stack.len() + 1);
+                assert_eq!(end.cur_stack_depth, self.tr.stack.len() + 1);
+                let mut enter_plus = enter;
+                enter_plus.cur_offset += 1;
+                let inner = &self.get(enter, enter_plus)[0];
+                &inner[(start.cur_offset)..(end.cur_offse)]
+            } else {
+                self.get(start, end)
+            }
+            x.to_owned()
+        }
+        let token_storage = UnsafeCell::new(token::DotDot);
+        let tr2 = TTReader::new(&x, &token_storage);
+        while let Some(st) = tr2.next() {
+            self.write(st.token);
+        }
+    }
+    fn finish(mut self) {
+        assert!(self.output_stack.is_empty());
+        self.output.extend_from_slice(&self.extra[..]);
+        self.tr.output = Some(self.output);
+    }
+}
 
 struct SpanToken<'a> {
     span: &'a Span,
@@ -78,7 +139,7 @@ type MarkCurStackDepth = ();
 fn make_cur_stack_depth(_: usize) -> MarkCurStackDepth { () }
 
 #[derive(Copy, Clone)]
-#[cfg_attr(derive_debug, derive(Debug))]
+#[cfg_attr(feature = "derive_debug", derive(Debug))]
 struct Mark {
     cur_stack_depth: MarkCurStackDepth,
     cur_offset: usize,
@@ -231,11 +292,21 @@ impl<'a> TTReader<'a> {
     fn mutate_mark(&mut self, mark: Mark) -> &mut TokenTree {
         self.check_mark(mark);
         let offset = mark.cur_offset;
-        let cur_offset = self.cur_offset;
         if self.output.is_none() {
-            self.output = Some(self.whole[..cur_offset].to_owned());
+            self.output = Some(self.whole[..self.cur_offset].to_owned());
         }
         &mut self.output.as_mut().unwrap()[offset]
+    }
+    fn writer<'x>(&'x mut self, mark: Mark, span: Span) -> TTWriter<'x, 'a> {
+        self.check_mark(mark);
+        let (output, extra) = if let Some(mut output) = replace(&mut self.output, None) {
+            let extra = output.split_off(mark.cur_offset);
+            (output, extra)
+        } else {
+            (self.whole[..mark.cur_offset].to_owned(),
+             self.whole[mark.cur_offset..self.cur_offset].to_owned())
+        };
+        TTWriter { tr: self, output_stack: Vec::new(), output: output, extra: extra, span: span }
     }
     #[cfg(debug_assertions)]
     fn check_mark(&self, mark: Mark) {
@@ -248,17 +319,22 @@ impl<'a> TTReader<'a> {
 struct Context<'x, 'y: 'x> {
     cx: &'x mut ExtCtxt<'y>
 }
-#[cfg_attr(derive_debug, derive(Debug))]
+#[cfg_attr(feature = "derive_debug", derive(Debug))]
 enum State {
     Null, // pops on , or closing delim, not skipping
     DefinitelyType { angle_depth: usize }, // pops on closing >, skipping it
+    AfterLt,
     GotIdent(Mark),
     GotIdentColonColon(Mark),
     GotFn,
     GotFnName { name: Mark, generic_start: Option<Mark> },
     CallArgStart(CallStuff), // skips
-    DeclArgStart { args: Vec<DeclArg>, name: Mark, generic_start: Option<Mark>, args_start: Mark, pending_default: bool }, // skips
-    DeclEnd { args: Vec<DeclArg>, old_new_name: Box<(ast::Ident, ast::Ident)>, generic_start: Option<Mark>, args_start: Mark },
+    DeclArgStart { decl: DeclStuff, pending_default: bool }, // skips
+    DeclEnd { decl: DeclStuff, etc: Box<(
+        /*old_name*/      ast::Ident,
+        /*new_full_name*/ ast::Ident,
+        /*args_end*/      Mark,
+    )> },
     SeekingSemiOrOpenBrace,
     Dummy,
 }
@@ -266,13 +342,20 @@ struct StackEntry {
     state: State,
     delim_depth: usize,
 }
-#[cfg_attr(derive_debug, derive(Debug))]
+#[cfg_attr(feature = "derive_debug", derive(Debug))]
 struct CallStuff {
     name: Mark,
     args: Vec<Option<Ident>>,
 }
+#[cfg_attr(feature = "derive_debug", derive(Debug))]
+struct DeclStuff {
+    name: Mark,
+    args: Vec<DeclArg>,
+    generic_start: Option<Mark>,
+    args_start: Mark,
+}
 #[derive(Clone, Copy)]
-#[cfg_attr(derive_debug, derive(Debug))]
+#[cfg_attr(feature = "derive_debug", derive(Debug))]
 struct DeclArg {
     name: Option<Ident>,
     ty_start: Option<Mark>,
@@ -287,20 +370,29 @@ struct Stuff<'x, 'y: 'x, 'z: 'y, 'a: 'x> {
     stack: Vec<StackEntry>,
 }
 
-fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &ast::Ident, new_full_name: &ast::Ident) {
-decl: &DeclStuff, include: &[bool], old_name: &ast::Ident, new_full_name: ast::Ident) {
+fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: usize, fn_start: Mark, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &ast::Ident, new_full_name: &ast::Ident) {
     let none_ident = Ident::with_empty_ctxt(token::intern("None"));
-    let tw = tr.writer();
+    let mut tw = tr.writer(fn_start, syntax_pos::COMMAND_LINE_SP);
     tw.write(token::Ident(keywords::Fn.ident()));
-    let partial_name = mutate_name(old_name, included_args());
+    let partial_name = mutate_name(old_name, {
+        let mut i = 0;
+        args.iter().filter_map(move |arg| {
+            if arg.is_default {
+                i += 1;
+                if i >= num_include {
+                    return None;
+                }
+            }
+            Some(arg.name.as_ref())
+        })
+    });
     tw.write(token::Ident(partial_name));
     if let Some(generic_start) = generic_start {
-        tw.copy_from_mark_range(generic_start, args_start);
+        tw.copy_from_mark_range(None, generic_start, args_start);
     }
     tw.write(token::OpenDelim(DelimToken::Paren));
-    let atr: TTReader<'a> = tr.reader_with_mark_range(args_start, args_end);
     let mut i = 0;
-    let arg_names: Vec<Ident> = Vec::with_capacity(args.len());
+    let mut arg_names: Vec<Ident> = Vec::with_capacity(args.len());
     for arg in args {
         if arg.is_default {
             i += 1;
@@ -309,12 +401,12 @@ decl: &DeclStuff, include: &[bool], old_name: &ast::Ident, new_full_name: ast::I
                 continue;
             }
         }
-        let arg_name = Ident::with_empty_ctxt(token::intern(&format!("x{}", arg_idx)));
-        tw.write(arg_name);
+        let arg_name = Ident::with_empty_ctxt(token::intern(&format!("x{}", arg_names.len())));
+        tw.write(Token::Ident(arg_name));
         arg_names.push(arg_name);
         tw.write(token::Colon);
         if let (Some(start), Some(end)) = (arg.ty_start, arg.ty_end) {
-            tw.copy_from_mark_range(start, end);
+            tw.copy_from_mark_range(Some(args_start), start, end);
         } else {
             // huh?
             tw.write(token::Underscore);
@@ -322,7 +414,7 @@ decl: &DeclStuff, include: &[bool], old_name: &ast::Ident, new_full_name: ast::I
         tw.write(token::Comma);
     }
     tw.write(token::CloseDelim(DelimToken::Paren));
-    tw.copy_from_mark_range(args_end, decl_end);
+    tw.copy_from_mark_range(None, args_end, decl_end);
     tw.write(token::OpenDelim(DelimToken::Brace));
     tw.write(token::Ident(*new_full_name));
     tw.write(token::OpenDelim(DelimToken::Paren));
@@ -331,9 +423,11 @@ decl: &DeclStuff, include: &[bool], old_name: &ast::Ident, new_full_name: ast::I
         tw.write(token::Comma);
     }
     tw.write(token::CloseDelim(DelimToken::Brace));
+    tw.finish();
 }
 
 fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>) {
+    let default_name = token::intern("default");
     let mut s: Stuff = Stuff {
         state: State::Null,
         delim_depth: 0,
@@ -361,20 +455,22 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
             continue;
         }}
     }
+    macro_rules! continue_next_pop { () => { continue_next!(pop(&mut s)) } }
+    macro_rules! continue_same_pop { () => { continue_same!(pop(&mut s)) } }
     #[inline(always)]
     fn push<'x, 'y, 'z, 'a>(s: &mut Stuff<'x, 'y, 'z, 'a>, state: State) {
         s.stack.push(StackEntry { state: state, delim_depth: s.delim_depth });
         s.delim_depth = 0;
     }
     #[inline(always)]
-    fn pop<'x, 'y, 'z, 'a>(s: &mut Stuff<'x, 'y, 'z, 'a>) {
+    fn pop<'x, 'y, 'z, 'a>(s: &mut Stuff<'x, 'y, 'z, 'a>) -> State {
         if let Some(entry) = s.stack.pop() {
             s.delim_depth = entry.delim_depth;
-            s.state = entry.state;
+            entry.state
         } else {
             println!("popped out of last state");
             s.delim_depth = 0;
-            s.state = State::Null;
+            State::Null
         }
     }
     st = st_or_return!();
@@ -383,7 +479,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
         println!("state={:?}", s.state);
         println!("depth={} dd={} tok={:?}", s.tr.stack.len(), s.delim_depth, st.token);
         match replace(&mut s.state, State::Dummy) {
-            State::Null {
+            State::Null => {
                 match st.token {
                     &token::Ident(ref ident) => {
                         // XXX trait, attr
@@ -413,20 +509,22 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                     },
                     &token::Colon => {
                         if s.delim_depth == 0  {
-                            let is_call: bool;
+                            let is_paren: bool;
                             // we do need to catch movement into type mode directly within parens,
                             // because of foo(a: b as c<d, e>::f)
                             // if this isn't directly within parens, it could be a struct literal,
                             // which is harder to deal with
                             match s.stack.last_mut() {
-                                Some(&mut State::DeclArgStart { ref mut args, .. }) => {
-                                    args.last_mut().unwrap().ty_start = Some(s.tr.mark_next());
-                                    is_call = true;
+                                Some(&mut StackEntry { state: State::DeclArgStart { ref mut decl, .. }, .. }) => {
+                                    decl.args.last_mut().unwrap().ty_start = Some(s.tr.mark_next());
+                                    is_paren = true;
                                 },
-                                Some(&mut State::CallArgStart(..)) => { is_call = true; },
-                                _ => { is_call = false; },
+                                Some(&mut StackEntry { state: State::CallArgStart { .. }, .. }) => {
+                                    is_paren = true;
+                                },
+                                _ => { is_paren = false; },
                             }
-                            if is_call {
+                            if is_paren {
                                 push(&mut s, State::Null);
                                 continue_next!(State::DefinitelyType { angle_depth: 0 });
                             }
@@ -518,12 +616,14 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
                         continue_next!(State::DeclArgStart {
-                            args: Vec::new(),
-                            name: name,
-                            generic_start: generic_start,
-                            args_start: s.tr.mark_next(),
+                            decl: DeclStuff {
+                                name: name,
+                                args: Vec::new(),
+                                generic_start: generic_start,
+                                args_start: s.tr.mark_next(),
+                            },
                             pending_default: false,
-                        }));
+                        });
                     },
                     _ => continue_same!(State::Null),
                 }
@@ -566,8 +666,8 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                     }
                 }
             },
-            State::DeclArgStart { mut args, name, generic_start, args_start, pending_default } => {
-                if let Some(prev_arg) = args.last_mut() {
+            State::DeclArgStart { mut decl, pending_default } => {
+                if let Some(prev_arg) = decl.args.last_mut() {
                     prev_arg.ty_end = Some(s.tr.mark_last());
                 }
                 match st.token {
@@ -579,10 +679,10 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                                 s.tr.delete_from_mark(to_delete, 1);
                                 match st.token {
                                     &token::Ident(ident1) => {
-                                        args.push(DeclArg { name: Some(ident1), ty_start: None, ty_end: None, is_default: pending_default })
+                                        decl.args.push(DeclArg { name: Some(ident1), ty_start: None, ty_end: None, is_default: pending_default });
                                     },
                                     &Token::Underscore => {
-                                        args.push(DeclArg { name: Some(ident2), ty_start: None, ty_end: None, is_default: pending_default })
+                                        decl.args.push(DeclArg { name: Some(ident2), ty_start: None, ty_end: None, is_default: pending_default });
                                         let st3 = st_or_return!();
                                         if let &Token::Colon = st3.token {} else {
                                             s.ctx.cx.span_err(*st3.span, "_ should be followed by an ident pattern");
@@ -594,36 +694,30 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                             },
                             _ => {
                                 // this could just be a type
-                                args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default })
+                                decl.args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default })
                             },
                         }
-                        push(&mut s, State::DeclArgStart {
-                            args: args,
-                            name: name,
-                            generic_start: generic_start,
-                            args_start: args_start,
-                            pending_default: pending_default
-                        });
+                        push(&mut s, State::DeclArgStart { decl: decl, pending_default: pending_default });
                         continue_same!(State::Null);
                     },
                     &token::CloseDelim(_) => {
-                        println!("decl closedelim: {:?}", args);
-                        if args.iter().any(|arg| arg.name.is_some() || arg.is_default) {
-                            let name = s.tr.mutate_mark(decl.name);
+                        println!("decl closedelim: {:?}", decl);
+                        if decl.args.iter().any(|arg| arg.name.is_some() || arg.is_default) {
+                            let args_end = s.tr.mark_last();
                             let new_full_name: ast::Ident;
                             let old_name: ast::Ident;
-                            if let TokenTree::Token(_, token::Ident(ref mut ident)) = *name {
+                            if let TokenTree::Token(_, token::Ident(ref mut ident)) = *s.tr.mutate_mark(decl.name) {
                                 old_name = *ident;
-                                new_full_name = mutate_name(ident, args.iter().map(|arg| arg.name.as_ref()))
+                                new_full_name = mutate_name(ident, decl.args.iter().map(|arg| arg.name.as_ref()));
                                 *ident = new_full_name;
                             } else { unreachable!(); }
                             // generate stubs for default arguments
-                            if args.iter().any(|arg| arg.is_default) {
-                                push(&mut s, State::DeclEnd {
-                                    args: args,
-                                    old_new_name: Box::new((old_name, new_full_name)),
-                                    generic_start: generic_start,
-                                });
+                            if decl.args.iter().any(|arg| arg.is_default) {
+                                push(&mut s, State::DeclEnd { decl: decl, etc: Box::new((
+                                    old_name,
+                                    new_full_name,
+                                    args_end,
+                                )) });
                                 continue_next!(State::SeekingSemiOrOpenBrace);
                             }
                         }
@@ -632,7 +726,6 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                     &token::Pound => { // #
                         let attr_start = s.tr.mark_last();
                         let st2 = st_or_return!();
-                        let mut flop: bool = true;
                         if let &token::OpenDelim(DelimToken::Bracket) = st2.token { // #[
                             let st3 = st_or_return!();
                             if let &token::Ident(ident) = st3.token {
@@ -644,41 +737,33 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                                         if pending_default {
                                             s.ctx.cx.span_err(*st2.span, "duplicate #[default]");
                                         }
-                                        flop = false;
+                                        continue_next!(State::DeclArgStart { decl: decl, pending_default: true });
 
                                     } else { st = st4; }
                                 } else { st = st3; }
                             } else { st = st3; }
                         } else { st = st2; }
-                        if flop {
-                            call.args.push(None);
-                            push(&mut s, State::DeclArgStart { args: args, name: name, generic_start: generic_start, args_start: args_start, pending_default: pending_default});
-                            continue_same!(State::Null);
-                        }
+                        decl.args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default });
+                        push(&mut s, State::DeclArgStart { decl: decl, pending_default: false });
+                        continue_same!(State::Null);
                     },
                     &token::Comma => (),
                     _ => {
-                        args.push(None);
-                        push(&mut s, State::DeclArgStart { args: args, name: name, generic_start: generic_start, args_start: args_start, pending_default: pending_default});
+                        decl.args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default });
+                        push(&mut s, State::DeclArgStart { decl: decl, pending_default: false });
                         continue_same!(State::Null);
                     },
                 }
             },
-            State::DeclEnd { args, old_new_name, generic_start, args_start } => {
-                let args_end: Mark = s.tr.mark_last();
+            State::DeclEnd { decl, etc } => {
                 // only get here if we need defaults
-                let default_count = args.filter(|arg| arg.is_default).count();
-                let (old_name, new_full_name) = *old_new_name;
+                let decl_end: Mark = s.tr.mark_last();
+                let mut fn_start: Mark = decl.name;
+                fn_start.cur_offset -= 1; // XXX
+                let default_count = decl.args.iter().filter(|arg| arg.is_default).count();
+                let (old_name, new_full_name, args_end) = *etc;
                 for num_include in 0..default_count {
-                    let mut num_seen = 0;
-                    let include: Vec<bool> = args.iter().map(|arg| {
-                        if arg.is_default {
-                            let j = num_seen;
-                            num_seen += 1;
-                            j < num_include
-                        } else { true }
-                    }).collect();
-                    gen_default_stub(s.tr, &args, num_include, generic_start, args_start, args_end, &old_name, &new_full_name);
+                    gen_default_stub(s.tr, &decl.args, num_include, fn_start, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name);
                 }
             }
             State::DefinitelyType { mut angle_depth } => {
@@ -760,386 +845,6 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
         st = st_or_return!();
     }
 }
-/*
-fn transform_this_fn(args: &[TokenTree], cx: &mut ExtCtxt) -> (Option<Vec<TokenTree>>, usize) {
-    let first = &args[0];
-    let ident = if let &TokenTree::Token(_, token::Ident(ref ident)) = first {
-        ident
-    } else { return (None, 0) };
-    if ident.name != keywords::Fn.name() { return (None, 0); }
-    // XXX generics
-    let (fn_name_span, fn_name_ident, delimed_span, delimed) =
-        if let (Some(&TokenTree::Token(fn_name_span, token::Ident(ref fn_name_ident))),
-                Some(&TokenTree::Delimited(delimed_span, ref delimed))) =
-               (args.get(1), args.get(2)) {
-            (fn_name_span, fn_name_ident, delimed_span, &**delimed)
-        } else { return (None, 1) };
-    if delimed.delim != token::DelimToken::Paren { return (None, 3) };
-    let tts = &delimed.tts[..];
-    let mut should_transform = false;
-    {
-        let mut i = 0;
-        'should_transform: loop {
-            match (tts.get(i), tts.get(i+1)) {
-                (Some(&TokenTree::Token(_, ref second)),
-                 Some(&TokenTree::Token(_, token::Ident(_)))) => {
-                    match *second {
-                        token::Ident(_) | token::Underscore => {
-                            should_transform = true;
-                            break 'should_transform;
-                        },
-                        _ => ()
-                    }
-                },
-                (Some(&TokenTree::Token(_, token::Pound)),
-                 Some(&TokenTree::Delimited(..))) => {
-                    i += 2;
-                    continue;
-                }
-                _ => ()
-            }
-            loop {
-                match tts.get(i) {
-                    Some(&TokenTree::Token(_, token::Comma)) => { i += 1; break; },
-                    None => { break 'should_transform; },
-                    _ => { i += 1; },
-                }
-            }
-        }
-    }
-    if !should_transform { return (None, 3 + generics.len()) };
-    #[derive(Debug)]
-    struct Arg<'a> {
-        comma: Option<&'a TokenTree>,
-        attrs: Vec<TokenTree>,
-        is_default: bool,
-        name: Option<&'a ast::Ident>,
-        pattern: Option<&'a [TokenTree]>,
-        temp_name: Option<ast::Ident>,
-        ty: &'a [TokenTree],
-    }
-    let mut parsed_out: Vec<Arg> = Vec::new();
-    let mut remaining = tts;
-    let mut comma: Option<&TokenTree> = None;
-    let mut default_count: usize = 0;
-    while remaining.len() != 0 {
-        let mut this_arg: &[TokenTree] = remaining;
-        let mut next: &[TokenTree] = &[];
-        let mut next_comma: Option<&TokenTree> = None;
-        let mut colon_idx: Option<usize> = None;
-        let mut attrs: Vec<TokenTree> = Vec::new();
-        let mut is_default: bool = false;
-        while let Some(&TokenTree::Token(_, token::Pound)) = this_arg.get(0) {
-            if let Some(&TokenTree::Delimited(delim_span, ref attr_delimed)) = this_arg.get(1) {
-                if attr_delimed.delim != token::DelimToken::Bracket { break }
-                // ok, this looks like an attr
-                let mut out: Vec<TokenTree> = Vec::new();
-                let comma_split = attr_delimed.tts.split(|a| {
-                    match a { &TokenTree::Token(_, token::Comma) => true, _ => false }
-                });
-                for attr in comma_split {
-                    if let &[TokenTree::Token(_, token::Ident(ref ident))] = attr {
-                        if ident.name.as_str() == "default" {
-                            is_default = true;
-                            default_count += 1;
-                            continue;
-                        }
-                    }
-                    out.extend_from_slice(attr);
-                }
-                if out.len() != 0 {
-                    attrs.push(this_arg[0].clone());
-                    attrs.push(TokenTree::Delimited(delim_span, Rc::new(Delimited {
-                        tts: out,
-                        ..**attr_delimed
-                    })));
-                }
-                this_arg = &this_arg[2..];
-            } else { break }
-        }
-        for (i, tt) in this_arg.iter().enumerate() {
-            match tt {
-                &TokenTree::Token(_, token::Comma) => {
-                    next_comma = Some(&this_arg[i]);
-                    next = &this_arg[i+1..];
-                    this_arg = &this_arg[..i];
-                    break;
-                },
-                &TokenTree::Token(_, token::Colon) => {
-                    if colon_idx.is_none() { colon_idx = Some(i); }
-                },
-                _ => (),
-            }
-        }
-
-        let name: Option<&ast::Ident> = match this_arg.get(1) {
-            Some(&TokenTree::Token(_, token::Ident(ref ident2))) =>
-                match this_arg.get(0) {
-                    Some(&TokenTree::Token(_, token::Ident(ref ident))) => {
-                        this_arg = &this_arg[1..];
-                        Some(ident)
-                    },
-                    Some(&TokenTree::Token(underscore_span, token::Underscore)) => {
-                        if colon_idx != Some(2) {
-                            let msg = "underscore not followed by an identifier binding";
-                            cx.span_err(underscore_span, msg);
-                        }
-                        this_arg = &this_arg[1..];
-                        Some(ident2)
-                    },
-                    _ => None,
-                },
-            _ => None
-        };
-        let (pattern, ty): (Option<&[TokenTree]>, &[TokenTree]) =
-            match colon_idx {
-                Some(colon_idx) => {
-                    let (a, b) = this_arg.split_at(colon_idx);
-                    (Some(a), b)
-                },
-                _ => (None, this_arg)
-            };
-        parsed_out.push(Arg { attrs: attrs, is_default: is_default, comma: comma, name: name, pattern: pattern, ty: ty });
-        remaining = next;
-        comma = next_comma;
-    }
-    let mut replacement: Vec<TokenTree> = Vec::new();
-    let mutated_full = mutate_name(fn_name_ident, parsed_out.iter().map(|arg| arg.name));
-    if default_count != 0 {
-        let mut i = parsed_out.len();
-        let fake_span: Span = ..;
-        let none: ast::Ident = Ident::with_empty_ctxt(token::Intern("None"));
-        while default_count != 0 {
-            loop {
-                i -= 1;
-                if parsed_out[i].is_default { break; }
-            }
-            i -= 1;
-            default_count -= 1;
-            let mutated = mutate_name(fn_name_ident, parsed_out[..i].iter().map(|arg| arg.name));
-
-            replacement.push(TokenTree::Token(fake_span, token::Ident(keywords::Fn.ident()))); // fn
-            replacement.push(TokenTree::Token(fake_span, token::Ident(mutated))); // name
-            replacement.extend_from_slice(generics); // <...>
-            let mut arg_tts: Vec<TokenTree> = Vec::new();
-            for (j, arg) in parsed_out[..i].iter_mut().enumerate() {
-                arg_tts.extend_from_slice(&arg.attrs[..]);
-                if j != 0 { arg_tts.push(arg.comma.unwrap().clone()); }
-                if arg.temp_name.is_none() {
-                    arg.temp_name = Some(if let Some(ref ident) = arg.name {
-                            ident.clone()
-                        } else {
-                            Ident::with_empty_ctxt(token::intern(&format!("arg{}", j)))
-                        });
-                }
-                replacement.push(TokenTree::Token(fake_span, token::Ident(arg.temp_name.unwrap())));
-                replacement.push(TokenTree::Token(fake_span, token::Colon));
-                arg_tts.extend_from_slice(arg.ty);
-            }
-            replacement.push(TokenTree::Delimited(fake_span, Rc::new(Delimited { // (...)
-                delim: token::DelimToken::Paren,
-                open_span: fake_span,
-                tts: arg_tts,
-                close_span: fake_span,
-            })));
-            // XX return type
-
-            // body
-            let mut body_tts: Vec<TokenTree> = Vec::new();
-            // XX <Self as TraitName>::
-            body_tts.push(TokenTree::Token(fake_span, token::Ident(mutated_full.clone())));
-            let mut recall_tts: Vec<TokenTree> = Vec::new();
-            for (j, arg) in parsed_out.iter().enumerate() {
-                let the_ident = if j < i {
-                    arg.temp_name.as_ref().unwrap().clone()
-                } else {
-                    none_ident.clone();
-                }
-                if j != 0 {
-                    body_tts.push(TokenTree::Token(fake_span, token::Comma));
-                }
-                body_tts.push(TokenTree::Token(fake_span, token::Ident(the_ident));
-            }
-            body_tts.push(TokenTree::Delimited(fake_span, Rc::new(Delimited {
-                delim: token::DelimToken::Paren,
-                open_span: fake_span,
-                tts: recall_tts,
-                close_span: fake_span,
-            })));
-
-            replacement.push(TokenTree::Delimited(fake_span, Rc::new(Delimited {
-                delim: token::DelimToken::Brace,
-                open_span: fake_span,
-                tts: body_tts,
-                close_span: fake_span,
-            })));
-
-        }
-    }
-    let mut replacement_tts: Vec<TokenTree> = Vec::new();
-    for (i, arg) in parsed_out.iter().enumerate() {
-        replacement_tts.extend_from_slice(&arg.attrs[..]);
-        if i != 0 { replacement_tts.push(arg.comma.unwrap().clone()); }
-        if let Some(pat) = arg.pattern { replacement_tts.extend_from_slice(pat); }
-        replacement_tts.extend_from_slice(arg.ty);
-    }
-    replacement.push(args[0].clone()); // fn
-    replacement.push(TokenTree::Token(fn_name_span, token::Ident(mutated_full))); // name
-    replacement.extend_from_slice(generics);
-    replacement.push(TokenTree::Delimited(delimed_span, Rc::new(Delimited {
-        tts: replacement_tts,
-        ..*delimed
-    })));
-
-    (Some(replacement), 3 + generics.len())
-}
-
-fn transform_this_invocation(args: &[TokenTree]) -> (Option<Vec<TokenTree>>, usize) {
-    let (fn_name_span, fn_name_ident, delimed_span, delimed) =
-        if let (Some(&TokenTree::Token(fn_name_span, token::Ident(ref fn_name_ident))),
-                Some(&TokenTree::Delimited(delimed_span, ref delimed))) =
-               (args.get(0), args.get(1)) {
-            (fn_name_span, fn_name_ident, delimed_span, &**delimed)
-        } else { return (None, 1) };
-    if delimed.delim != token::DelimToken::Paren { return (None, 1) };
-    let tts = &delimed.tts[..];
-    struct Stuff<'a> {
-        replacement_tts: Vec<TokenTree>,
-        arg_names: Vec<Option<&'a ast::Ident>>,
-    }
-    let mut num_args = 0;
-    let mut stuff: Stuff;
-    let mut i = 0;
-    loop {
-        let tt: &TokenTree = if let Some(tt) = tts.get(i) { tt } else {
-            return (None, 2)
-        };
-        if let &TokenTree::Token(_, token::Ident(ref ident)) = tt {
-            if let Some(&TokenTree::Token(_, token::Colon)) = tts.get(i+1) {
-                stuff = Stuff {
-                    replacement_tts: tts[..i].to_owned(),
-                    arg_names: (0..num_args).map(|_| None).collect(),
-                };
-                stuff.arg_names.push(Some(ident));
-                i += 2;
-                break;
-            }
-        }
-        num_args += 1;
-        loop {
-            let next = if let Some(tt) = tts.get(i) { tt } else {
-                return (None, 2)
-            };
-            i += 1;
-            if let &TokenTree::Token(_, token::Comma) = next { break }
-        }
-    }
-    'outer: loop {
-        loop {
-            let next = if let Some(tt) = tts.get(i) { tt } else { break 'outer };
-            stuff.replacement_tts.push(next.clone());
-            i += 1;
-            if let &TokenTree::Token(_, token::Comma) = next { break }
-        }
-        let tt = if let Some(tt) = tts.get(i) { tt } else { break };
-        let mut arg_name = None;
-        if let &TokenTree::Token(_, token::Ident(ref ident)) = tt {
-            if let Some(&TokenTree::Token(_, token::Colon)) = tts.get(i+1) {
-                arg_name = Some(ident);
-                i += 2;
-            }
-        }
-        stuff.arg_names.push(arg_name);
-    }
-    let mutated = mutate_name(fn_name_ident, stuff.arg_names.into_iter());
-    let replacement = vec![
-        TokenTree::Token(fn_name_span, token::Ident(mutated)),
-        TokenTree::Delimited(delimed_span, Rc::new(Delimited {
-            tts: stuff.replacement_tts,
-            ..*delimed
-        }))
-    ];
-    (Some(replacement), 2)
-}
-
-fn transform_this(args: &[TokenTree], cx: &mut xtCtxt) -> (Option<Vec<TokenTree>>, usize) {
-    let (x, count) = transform_this_fn(args, cx);
-    if count != 0 { return (x, count); }
-    transform_this_invocation(args)
-}
-
-fn transform_tts_direct<'a>(args: &'a [TokenTree], cx: &mut ExtCtxt) -> Cow<'a, [TokenTree]> {
-    let mut remaining_args = args;
-    let mut vec: Vec<TokenTree>;
-    loop {
-        let len = remaining_args.len();
-        if len == 0 { return Cow::Borrowed(args); }
-        let (x, count) = transform_this(remaining_args, cx);
-        remaining_args = &remaining_args[count..];
-        if let Some(to_add) = x {
-            vec = args[..(args.len() - len)].to_vec();
-            vec.extend_from_slice(&to_add[..]);
-            break;
-        }
-    }
-    loop {
-        if remaining_args.len() == 0 { return Cow::Owned(vec); }
-        let (x, count) = transform_this(remaining_args, cx);
-        if let Some(to_add) = x {
-            vec.extend_from_slice(&to_add[..]);
-        } else {
-            vec.extend_from_slice(&remaining_args[..count]);
-        }
-        remaining_args = &remaining_args[count..];
-    }
-}
-
-fn transform_tts<'a>(args: &'a [TokenTree], cx: &mut ExtCtxt) -> Cow<'a, [TokenTree]> {
-    let mut tts: Cow<[TokenTree]> = transform_tts_direct(args, cx);
-    //println!("==> {:?}", tts);
-    let mut replacement: Option<(usize, Vec<TokenTree>)> = None;
-    let mut mut_start_i: Option<usize> = None;
-    if let Cow::Borrowed(btts) = tts {
-        for (i, tt) in btts.iter().enumerate() {
-            if let &TokenTree::Delimited(_, ref delimed) = tt {
-                let new_inner = transform_tts(&delimed.tts[..], cx);
-                if let Cow::Owned(xreplacement) = new_inner {
-                    replacement = Some((i, xreplacement));
-                    mut_start_i = Some(i + 1);
-                    break;
-                }
-            }
-        }
-    } else {
-        mut_start_i = Some(0);
-    }
-    if let Some((i, replacement)) = replacement {
-        if let TokenTree::Delimited(_, ref mut delimed) = tts.to_mut()[i] {
-            *delimed = Rc::new(Delimited {
-                tts: replacement,
-                ..**delimed
-            });
-        } else { panic!(); }
-    }
-    if let Some(i) = mut_start_i {
-        for tt in tts.to_mut()[i..].iter_mut() {
-            if let &mut TokenTree::Delimited(_, ref mut delimed) = tt {
-                let replacement = {
-                    let new_inner = transform_tts(&delimed.tts[..], cx);
-                    if let Cow::Owned(replacement) = new_inner { Some(replacement) } else { None }
-                };
-                if let Some(replacement) = replacement {
-                    *delimed = Rc::new(Delimited {
-                        tts: replacement,
-                        ..**delimed
-                    });
-                }
-            }
-        }
-    }
-    tts
-}
-*/
 
 fn expand_namedarg<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree])
         -> Box<MacResult + 'static> {
