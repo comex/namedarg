@@ -7,3 +7,7 @@ authors = ["comex <comexk@gmail.com>"]
 
 [lib]
 crate-type = ["dylib"]
+
+[features]
+# this is only for temporary testing
+derive_debug = []
