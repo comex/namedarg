@@ -623,7 +623,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             continue_next!(State::Null { after_lt: true });
                         }
                     },
-                    &token::Gt | &token::BinOp(token::Shr) => {
+                    &token::Gt | &token::BinOp(token::Shr) | &token::Semi => {
                         after_lt = false;
                     },
                     _ => (),
@@ -668,6 +668,10 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                 match st.token {
                     &token::Ident(_) => {
                         continue_next!(State::GotFnName { name: s.tr.mark_last(), generic_start: None });
+                    },
+                    &token::Dollar => {
+                        // hack for macro definitions - 'fn $foo(a: ...)'
+                        continue_next!(State::GotFn { after_lt: after_lt });
                     },
                     _ => continue_same!(State::Null { after_lt: after_lt }),
                 }
