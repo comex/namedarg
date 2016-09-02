@@ -978,21 +978,17 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                 }
                 continue_next!(State::SeekingSemiOrOpenBrace);
             },
-            State::LambdaEnd => {
-                // this is used as a token to indicate | should be treated as close
+            state @ State::LambdaEnd | state @ State::ControlBlock => {
+                // these are used as tokens
                 match st.token {
                     &token::Comma => {
-                        push(&mut s, State::LambdaEnd);
+                        push(&mut s, state);
                         continue_next!(State::Null { expecting_operator: false });
                     },
                     _ => {
                         continue_same!(State::Null { expecting_operator: true });
                     },
                 }
-            },
-            State::ControlBlock => {
-                // also a token
-                continue_same_pop!();
             },
             State::StructLiteral => {
                 match st.token {
@@ -1021,8 +1017,11 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         continue_next!(State::Null { expecting_operator: true });
                     },
                     _ => {
-                        // TODO relax this once I'm satisfied it works
-                        s.ctx.cx.span_err(*st.span, "unexpected thingy in struct literal. possible parser bug");
+                        // I don't know what this is.
+                        // But this might not really be a struct literal.  It could be something like
+                        // 'macro_rules! X { }' or 'mod X { }'.
+                        // We could try to detect these... <work>
+                        continue_next!(State::Null { expecting_operator: false });
                     },
                 }
                 // also a token
