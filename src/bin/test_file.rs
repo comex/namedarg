@@ -28,7 +28,7 @@ fn main() {
 
     let token_storage = UnsafeCell::new(token::DotDot);
     let mut tr = TTReader::new(&tts, &token_storage);
-    let mut ctx = Context { cx: &mut FakeExtCtxt };
+    let mut ctx = Context { cx: &mut FakeExtCtxt::new() };
     do_transform(&mut tr, &mut ctx);
     let time_2 = Instant::now();
     println!("parse:{} transform:{}", nanos(time_1 - time_0), nanos(time_2 - time_1));
@@ -36,6 +36,9 @@ fn main() {
         println!("{}: we transformed :( writing to /tmp/pp[ab]", filename);
         write_to_file("/tmp/ppa", &pprust::tts_to_string(&tts));
         write_to_file("/tmp/ppb", &pprust::tts_to_string(tr.output_as_slice()));
+        std::process::exit(1);
+    } else if ctx.cx.any_errs.get() || ctx.cx.any_warns.get() {
+        println!("{}: got errors/warnings", filename);
         std::process::exit(1);
     } else {
         println!("ok");

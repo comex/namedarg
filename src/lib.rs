@@ -18,7 +18,7 @@ use syntax::parse::token::{Token, DelimToken};
 use syntax::parse::token::keywords;
 use std::rc::Rc;
 use std::mem::replace;
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 
 fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
     -> Box<MacResult + 'static> {
@@ -351,13 +351,23 @@ impl<'a> ExtCtxtish for ExtCtxt<'a> {
     fn span_warn(&self, sp: Span, msg: &str) { ExtCtxt::span_warn(self, sp, msg) }
 }
 
-pub struct FakeExtCtxt;
+pub struct FakeExtCtxt {
+    pub any_errs: Cell<bool>,
+    pub any_warns: Cell<bool>,
+}
+impl FakeExtCtxt {
+    pub fn new() -> Self {
+        FakeExtCtxt { any_errs: Cell::new(false), any_warns: Cell::new(false) }
+    }
+}
 impl ExtCtxtish for FakeExtCtxt {
     fn span_err(&self, _sp: Span, msg: &str) {
         println!("<err> {}", msg);
+        self.any_errs.set(true);
     }
     fn span_warn(&self, _sp: Span, msg: &str) {
         println!("<warn> {}", msg);
+        self.any_warns.set(true);
     }
 }
 
