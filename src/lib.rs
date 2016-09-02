@@ -633,16 +633,16 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     },
                     &token::Lt => {
                         push(&mut s, State::Null);
-                        continue_next!(State::DefinitelyType { angle_depth: 1 });
+                        continue_next!(State::DefinitelyType { angle_depth: 2 });
                     },
                     &token::Colon => {
                         push(&mut s, State::Null);
-                        continue_next!(State::DefinitelyType { angle_depth: 0 });
+                        continue_next!(State::DefinitelyType { angle_depth: 1 });
                     },
                     &token::Ident(ref ident) => {
                         if ident.name == keywords::As.name() {
                             push(&mut s, State::Null);
-                            continue_next!(State::DefinitelyType { angle_depth: 0 });
+                            continue_next!(State::DefinitelyType { angle_depth: 1 });
                         }
                     },
                     &token::CloseDelim(_) => {
