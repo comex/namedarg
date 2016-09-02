@@ -40,12 +40,18 @@ fn mutate_name<'a, I>(fn_name_ident: &ast::Ident, arg_names: I) -> ast::Ident
     let mut name: String = (*fn_name_ident.name.as_str()).to_owned();
     name.push('{');
     //name.push_str("_$lbl");
+    let mut any = false;
     for arg_name in arg_names {
         //name.push('_');
         if let Some(arg_name) = arg_name {
             name.push_str(&*arg_name.name.as_str());
         }
         name.push(':');
+        any = true;
+    }
+    if !any {
+        // if all arguments defaulted, use an untransformed ident
+        return *fn_name_ident;
     }
     name.push('}');
     ast::Ident { name: token::intern(&name), ctxt: fn_name_ident.ctxt }
