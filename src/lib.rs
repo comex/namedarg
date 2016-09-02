@@ -404,7 +404,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: us
         args.iter().filter_map(move |arg| {
             if arg.is_default {
                 i += 1;
-                if i >= num_include {
+                if i > num_include {
                     return None;
                 }
             }
@@ -421,7 +421,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: us
     for arg in args {
         if arg.is_default {
             i += 1;
-            if i >= num_include {
+            if i > num_include {
                 arg_names.push(none_ident);
                 continue;
             }
