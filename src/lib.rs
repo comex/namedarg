@@ -68,17 +68,20 @@ struct TTWriter<'x, 'a: 'x> {
 
 impl<'x, 'a: 'x> TTWriter<'x, 'a> {
     fn write(&mut self, tok: Token) {
+        println!("*write* {:?}", tok);
         match tok {
             token::OpenDelim(_) => {
                 self.output_stack.push(replace(&mut self.output, Vec::new()));
             },
             token::CloseDelim(delim) => {
-                self.output.push(TokenTree::Delimited(self.span, Rc::new(Delimited {
+                let mut output = self.output_stack.pop().unwrap();
+                output.push(TokenTree::Delimited(self.span, Rc::new(Delimited {
                     delim: delim,
                     open_span: self.span,
-                    tts: self.output_stack.pop().unwrap(),
+                    tts: replace(&mut self.output, Vec::new()),
                     close_span: self.span,
                 })));
+                self.output = output;
             },
             _ => {
                 self.output.push(TokenTree::Token(self.span, tok));
@@ -88,9 +91,12 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
     fn get(&self, start: Mark, end: Mark) -> &[TokenTree] {
         assert_eq!(start.cur_stack_depth, self.tr.stack.len());
         assert_eq!(end.cur_stack_depth, self.tr.stack.len());
-        &self.output[start.cur_offset..end.cur_offset]
+        let output0 = self.output_stack.get(0).unwrap_or(&self.output);
+        &output0[start.cur_offset..end.cur_offset]
     }
     fn copy_from_mark_range(&mut self, enter: Option<Mark>, start: Mark, end: Mark) {
+        println!("CFMR: enter={:?} start={:?} end={:?}", enter, start, end);
+        println!("CFMR: have {:?}",self.output);
         let to_add: Vec<TokenTree> = {
             let x: &[TokenTree] = if let Some(enter) = enter {
                 assert_eq!(start.cur_stack_depth, self.tr.stack.len() + 1);
@@ -111,6 +117,7 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
         while let Some(st) = tr2.next() {
             self.write(st.token.clone());
         }
+        println!("CFMR out");
     }
     fn finish(mut self) {
         assert!(self.output_stack.is_empty());
@@ -245,15 +252,28 @@ impl<'a> TTReader<'a> {
         }
     }
     fn mark_last(&self) -> Mark {
-        Mark {
-            cur_offset: self.cur_offset - 1,
-            cur_stack_depth: make_cur_stack_depth(self.stack.len())
+        if self.cur_offset == 0 {
+            let &(pwhole, pcur, ref poutput) = self.stack.last().unwrap();
+            let pos = if let &Some(ref poutput) = poutput {
+                poutput.len()
+            } else {
+                pwhole.len() - pcur.len()
+            };
+            Mark {
+                cur_offset: pos,
+                cur_stack_depth: make_cur_stack_depth(self.stack.len() - 1),
+            }
+        } else {
+            Mark {
+                cur_offset: self.cur_offset - 1,
+                cur_stack_depth: make_cur_stack_depth(self.stack.len()),
+            }
         }
     }
     fn mark_next(&self) -> Mark {
         Mark {
             cur_offset: self.cur_offset,
-            cur_stack_depth: make_cur_stack_depth(self.stack.len())
+            cur_stack_depth: make_cur_stack_depth(self.stack.len()),
         }
     }
     fn force_pop(&mut self) {
@@ -353,6 +373,7 @@ struct DeclStuff {
     args: Vec<DeclArg>,
     generic_start: Option<Mark>,
     args_start: Mark,
+    decl_end: Option<Mark>,
 }
 #[derive(Clone, Copy)]
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
@@ -404,14 +425,14 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: us
         let arg_name = Ident::with_empty_ctxt(token::intern(&format!("x{}", arg_names.len())));
         tw.write(Token::Ident(arg_name));
         arg_names.push(arg_name);
-        tw.write(token::Colon);
         if let (Some(start), Some(end)) = (arg.ty_start, arg.ty_end) {
             tw.copy_from_mark_range(Some(args_start), start, end);
         } else {
             // huh?
+            tw.write(token::Colon);
             tw.write(token::Underscore);
+            tw.write(token::Comma);
         }
-        tw.write(token::Comma);
     }
     tw.write(token::CloseDelim(DelimToken::Paren));
     tw.copy_from_mark_range(None, args_end, decl_end);
@@ -422,6 +443,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: us
         tw.write(token::Ident(name));
         tw.write(token::Comma);
     }
+    tw.write(token::CloseDelim(DelimToken::Paren));
     tw.write(token::CloseDelim(DelimToken::Brace));
     tw.finish();
 }
@@ -516,7 +538,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                             // which is harder to deal with
                             match s.stack.last_mut() {
                                 Some(&mut StackEntry { state: State::DeclArgStart { ref mut decl, .. }, .. }) => {
-                                    decl.args.last_mut().unwrap().ty_start = Some(s.tr.mark_next());
+                                    decl.args.last_mut().unwrap().ty_start = Some(s.tr.mark_last());
                                     is_paren = true;
                                 },
                                 Some(&mut StackEntry { state: State::CallArgStart { .. }, .. }) => {
@@ -555,13 +577,19 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                     &token::Lt => {
                         continue_next!(State::DefinitelyType { angle_depth: 1 });
                     },
-                    &token::Comma => {
+                    &token::Gt | &token::Comma => {
                         continue_next!(State::Null);
+                    },
+                    &token::Colon => {
+                        continue_next!(State::DefinitelyType { angle_depth: 0 });
                     },
                     &token::Ident(ref ident) => {
                         if ident.name == keywords::As.name() {
                             continue_next!(State::DefinitelyType { angle_depth: 0 });
                         }
+                    },
+                    &token::CloseDelim(_) => {
+                        continue_same_pop!();
                     },
                     _ => (),
                 }
@@ -622,7 +650,8 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                                 name: name,
                                 args: Vec::new(),
                                 generic_start: generic_start,
-                                args_start: s.tr.mark_next(),
+                                args_start: s.tr.mark_last(),
+                                decl_end: None,
                             },
                             pending_default: false,
                         });
@@ -708,7 +737,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                     &token::CloseDelim(_) => {
                         println!("decl closedelim: {:?}", decl);
                         if decl.args.iter().any(|arg| arg.name.is_some() || arg.is_default) {
-                            let args_end = s.tr.mark_last();
+                            let args_end = s.tr.mark_next();
                             let new_full_name: ast::Ident;
                             let old_name: ast::Ident;
                             if let TokenTree::Token(_, token::Ident(ref mut ident)) = *s.tr.mutate_mark(decl.name) {
@@ -762,11 +791,20 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
             },
             State::DeclEnd { decl, etc } => {
                 // only get here if we need defaults
-                let decl_end: Mark = s.tr.mark_last();
-                let default_count = decl.args.iter().filter(|arg| arg.is_default).count();
-                let (old_name, new_full_name, args_end) = *etc;
-                for num_include in 0..default_count {
-                    gen_default_stub(s.tr, &decl.args, num_include, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name);
+                match st.token {
+                    &token::Semi | &Token::CloseDelim(DelimToken::Brace) => {
+                        let decl_end: Mark = decl.decl_end.unwrap_or_else(|| s.tr.mark_last());
+                        let default_count = decl.args.iter().filter(|arg| arg.is_default).count();
+                        let (old_name, new_full_name, args_end) = *etc;
+                        for num_include in 0..default_count {
+                            gen_default_stub(s.tr, &decl.args, num_include, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name);
+                        }
+                    },
+                    &Token::OpenDelim(DelimToken::Brace) => {
+                        push(&mut s, State::DeclEnd { decl: decl, etc: etc });
+                        continue_next!(State::Null);
+                    },
+                    _ => panic!("unexpected token at decl end"),
                 }
             }
             State::DefinitelyType { mut angle_depth } => {
