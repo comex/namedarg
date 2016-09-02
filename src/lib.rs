@@ -22,6 +22,12 @@ use std::rc::Rc;
 use std::mem::replace;
 use std::cell::UnsafeCell;
 
+macro_rules! xunreachable {
+    () => {
+        unreachable!("at line {}", line!())
+    }
+}
+
 fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
     -> Box<MacResult + 'static> {
     let mut parser = cx.new_parser_from_tts(args);
@@ -56,7 +62,6 @@ fn mutate_name<'a, I>(fn_name_ident: &ast::Ident, arg_names: I) -> ast::Ident
 struct TTWriter<'x, 'a: 'x> {
     tr: &'x mut TTReader<'a>,
     output_stack: Vec<Vec<TokenTree>>,
-    orig_output_
     output: Vec<TokenTree>,
     span: Span,
 }
@@ -83,10 +88,7 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
     fn get(&self, start: Mark, end: Mark) -> &[TokenTree] {
         assert_eq!(start.cur_stack_depth, self.tr.stack.len());
         assert_eq!(end.cur_stack_depth, self.tr.stack.len());
-        let (start, end) = (start.cur_offset, end.cut_offset);
-        let cutoff = 
-
-
+        &self.output[start.cur_offset..end.cur_offset]
     }
     fn copy_from_mark_range(&mut self, enter: Option<Mark>, start: Mark, end: Mark) {
         let to_add: Vec<TokenTree> = {
@@ -96,21 +98,22 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
                 let mut enter_plus = enter;
                 enter_plus.cur_offset += 1;
                 let inner = &self.get(enter, enter_plus)[0];
-                &inner[(start.cur_offset)..(end.cur_offse)]
+                if let &TokenTree::Delimited(_, ref delimed) = inner {
+                    &delimed.tts[(start.cur_offset)..(end.cur_offset)]
+                } else { xunreachable!() }
             } else {
                 self.get(start, end)
-            }
+            };
             x.to_owned()
-        }
+        };
         let token_storage = UnsafeCell::new(token::DotDot);
-        let tr2 = TTReader::new(&x, &token_storage);
+        let mut tr2 = TTReader::new(&to_add, &token_storage);
         while let Some(st) = tr2.next() {
-            self.write(st.token);
+            self.write(st.token.clone());
         }
     }
     fn finish(mut self) {
         assert!(self.output_stack.is_empty());
-        self.output.extend_from_slice(&self.extra[..]);
         self.tr.output = Some(self.output);
     }
 }
@@ -297,16 +300,13 @@ impl<'a> TTReader<'a> {
         }
         &mut self.output.as_mut().unwrap()[offset]
     }
-    fn writer<'x>(&'x mut self, mark: Mark, span: Span) -> TTWriter<'x, 'a> {
-        self.check_mark(mark);
-        let (output, extra) = if let Some(mut output) = replace(&mut self.output, None) {
-            let extra = output.split_off(mark.cur_offset);
-            (output, extra)
+    fn writer<'x>(&'x mut self, span: Span) -> TTWriter<'x, 'a> {
+        let output = if let Some(output) = replace(&mut self.output, None) {
+            output
         } else {
-            (self.whole[..mark.cur_offset].to_owned(),
-             self.whole[mark.cur_offset..self.cur_offset].to_owned())
+            self.whole[..self.cur_offset].to_owned()
         };
-        TTWriter { tr: self, output_stack: Vec::new(), output: output, extra: extra, span: span }
+        TTWriter { tr: self, output_stack: Vec::new(), output: output, span: span }
     }
     #[cfg(debug_assertions)]
     fn check_mark(&self, mark: Mark) {
@@ -370,9 +370,9 @@ struct Stuff<'x, 'y: 'x, 'z: 'y, 'a: 'x> {
     stack: Vec<StackEntry>,
 }
 
-fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: usize, fn_start: Mark, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &ast::Ident, new_full_name: &ast::Ident) {
+fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &ast::Ident, new_full_name: &ast::Ident) {
     let none_ident = Ident::with_empty_ctxt(token::intern("None"));
-    let mut tw = tr.writer(fn_start, syntax_pos::COMMAND_LINE_SP);
+    let mut tw = tr.writer(syntax_pos::COMMAND_LINE_SP);
     tw.write(token::Ident(keywords::Fn.ident()));
     let partial_name = mutate_name(old_name, {
         let mut i = 0;
@@ -475,9 +475,9 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
     }
     st = st_or_return!();
     loop {
-        s.ctx.cx.span_warn(*st.span, "hi");
-        println!("state={:?}", s.state);
+        println!("state={:?} stack={}", s.state, s.stack.len());
         println!("depth={} dd={} tok={:?}", s.tr.stack.len(), s.delim_depth, st.token);
+        s.ctx.cx.span_warn(*st.span, "hi");
         match replace(&mut s.state, State::Dummy) {
             State::Null => {
                 match st.token {
@@ -580,6 +580,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                         // (associated types need an explicitly specified trait)
                         // but it doesn't matter, because 'Fn(a: b)' is not valid, so any valid Fn
                         // traits will be unmodified and so unharmed
+                        push(&mut s, State::Null);
                         continue_next!(State::CallArgStart(CallStuff {
                             name: name,
                             args: Vec::new(),
@@ -615,6 +616,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                         continue_next!(State::DefinitelyType { angle_depth: 1 });
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
+                        push(&mut s, State::Null);
                         continue_next!(State::DeclArgStart {
                             decl: DeclStuff {
                                 name: name,
@@ -654,10 +656,13 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                                     let new_name = mutate_name(ident, call.args.iter().map(|arg| arg.as_ref()));
                                     *ident = new_name;
                                 },
-                                _ => unreachable!(),
+                                _ => xunreachable!(),
                             }
                         }
                         continue_next_pop!();
+                    },
+                    &token::Comma => {
+                        continue_next!(State::CallArgStart(call));
                     },
                     _ => {
                         call.args.push(None);
@@ -689,7 +694,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
 
                                         }
                                     },
-                                    _ => unreachable!(),
+                                    _ => xunreachable!(),
                                 };
                             },
                             _ => {
@@ -710,7 +715,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                                 old_name = *ident;
                                 new_full_name = mutate_name(ident, decl.args.iter().map(|arg| arg.name.as_ref()));
                                 *ident = new_full_name;
-                            } else { unreachable!(); }
+                            } else { xunreachable!(); }
                             // generate stubs for default arguments
                             if decl.args.iter().any(|arg| arg.is_default) {
                                 push(&mut s, State::DeclEnd { decl: decl, etc: Box::new((
@@ -747,7 +752,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                         push(&mut s, State::DeclArgStart { decl: decl, pending_default: false });
                         continue_same!(State::Null);
                     },
-                    &token::Comma => (),
+                    &token::Comma => continue_next!(State::DeclArgStart { decl: decl, pending_default: false }),
                     _ => {
                         decl.args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default });
                         push(&mut s, State::DeclArgStart { decl: decl, pending_default: false });
@@ -758,12 +763,10 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
             State::DeclEnd { decl, etc } => {
                 // only get here if we need defaults
                 let decl_end: Mark = s.tr.mark_last();
-                let mut fn_start: Mark = decl.name;
-                fn_start.cur_offset -= 1; // XXX
                 let default_count = decl.args.iter().filter(|arg| arg.is_default).count();
                 let (old_name, new_full_name, args_end) = *etc;
                 for num_include in 0..default_count {
-                    gen_default_stub(s.tr, &decl.args, num_include, fn_start, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name);
+                    gen_default_stub(s.tr, &decl.args, num_include, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name);
                 }
             }
             State::DefinitelyType { mut angle_depth } => {
@@ -840,7 +843,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                 }
                 continue_next!(State::SeekingSemiOrOpenBrace);
             },
-            State::Dummy => unreachable!(),
+            State::Dummy => xunreachable!(),
         }
         st = st_or_return!();
     }
