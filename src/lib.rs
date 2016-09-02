@@ -11,22 +11,14 @@ use syntax_pos::Span;
 use syntax::ast;
 use syntax::ast::Ident;
 use syntax::util::small_vector::SmallVector;
-use syntax::print::pprust;
+//use syntax::print::pprust;
 use rustc_plugin::registry::Registry;
-//use syntax::parse::parser::Parser;
 use syntax::parse::token;
 use syntax::parse::token::{Token, DelimToken};
 use syntax::parse::token::keywords;
 use std::rc::Rc;
-//use std::borrow::Cow;
 use std::mem::replace;
 use std::cell::UnsafeCell;
-
-macro_rules! xunreachable {
-    () => {
-        unreachable!("at line {}", line!())
-    }
-}
 
 fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
     -> Box<MacResult + 'static> {
@@ -68,7 +60,7 @@ struct TTWriter<'x, 'a: 'x> {
 
 impl<'x, 'a: 'x> TTWriter<'x, 'a> {
     fn write(&mut self, tok: Token) {
-        println!("*write* {:?}", tok);
+        //println!("*write* {:?}", tok);
         match tok {
             token::OpenDelim(_) => {
                 self.output_stack.push(replace(&mut self.output, Vec::new()));
@@ -95,8 +87,8 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
         &output0[start.cur_offset..end.cur_offset]
     }
     fn copy_from_mark_range(&mut self, enter: Option<Mark>, start: Mark, end: Mark) {
-        println!("CFMR: enter={:?} start={:?} end={:?}", enter, start, end);
-        println!("CFMR: have {:?}",self.output);
+        //println!("CFMR: enter={:?} start={:?} end={:?}", enter, start, end);
+        //println!("CFMR: have {:?}",self.output);
         let to_add: Vec<TokenTree> = {
             let x: &[TokenTree] = if let Some(enter) = enter {
                 assert_eq!(start.cur_stack_depth, self.tr.stack.len() + 1);
@@ -106,7 +98,7 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
                 let inner = &self.get(enter, enter_plus)[0];
                 if let &TokenTree::Delimited(_, ref delimed) = inner {
                     &delimed.tts[(start.cur_offset)..(end.cur_offset)]
-                } else { xunreachable!() }
+                } else { unreachable!() }
             } else {
                 self.get(start, end)
             };
@@ -117,10 +109,11 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
         while let Some(st) = tr2.next() {
             self.write(st.token.clone());
         }
-        println!("CFMR out");
+        //println!("CFMR out");
     }
     fn finish(mut self) {
         assert!(self.output_stack.is_empty());
+        self.tr.cur_offset = self.output.len();
         self.tr.output = Some(self.output);
     }
 }
@@ -291,26 +284,26 @@ impl<'a> TTReader<'a> {
         self.whole.len() - self.cur.len()
     }
     fn delete_from_mark(&mut self, mark: Mark, count: usize) {
-        println!("dfm({})", count);
+        //println!("dfm({})", count);
         self.check_mark(mark);
         let offset = mark.cur_offset;
         let cur_offset = self.cur_offset;
         if let Some(ref mut output) = self.output {
-            println!("dfm: old ({:?})", output);
-            println!("offset = {} len = {}", offset, output.len());
+            //println!("dfm: old ({:?})", output);
+            //println!("offset = {} len = {}", offset, output.len());
             for _ in 0..count {
                 output.remove(offset);
             }
             self.cur_offset = output.len();
         } else {
-            println!("dfm: new");
+            //println!("dfm: new");
             let mut vec = self.whole[..offset].to_owned();
             vec.extend_from_slice(&self.whole[offset+count..cur_offset]);
             self.cur_offset = vec.len();
             self.output = Some(vec);
         }
-        println!("dfm: now we look like {}", pprust::tts_to_string(self.output.as_ref().unwrap()));
-        println!("...cur is {}", pprust::tts_to_string(self.cur));
+        //println!("dfm: now we look like {}", pprust::tts_to_string(self.output.as_ref().unwrap()));
+        //println!("...cur is {}", pprust::tts_to_string(self.cur));
     }
     fn mutate_mark(&mut self, mark: Mark) -> &mut TokenTree {
         self.check_mark(mark);
@@ -393,7 +386,18 @@ struct Stuff<'x, 'y: 'x, 'z: 'y, 'a: 'x> {
 
 fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &ast::Ident, new_full_name: &ast::Ident) {
     let none_ident = Ident::with_empty_ctxt(token::intern("None"));
+    let allow_ident = Ident::with_empty_ctxt(token::intern("allow"));
+    let dead_code_ident = Ident::with_empty_ctxt(token::intern("dead_code"));
     let mut tw = tr.writer(syntax_pos::COMMAND_LINE_SP);
+    // #[allow(dead_code)]
+    tw.write(token::Pound);
+    tw.write(token::OpenDelim(DelimToken::Bracket));
+    tw.write(token::Ident(allow_ident));
+    tw.write(token::OpenDelim(DelimToken::Paren));
+    tw.write(token::Ident(dead_code_ident));
+    tw.write(token::CloseDelim(DelimToken::Paren));
+    tw.write(token::CloseDelim(DelimToken::Bracket));
+
     tw.write(token::Ident(keywords::Fn.ident()));
     let partial_name = mutate_name(old_name, {
         let mut i = 0;
@@ -497,9 +501,9 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
     }
     st = st_or_return!();
     loop {
-        println!("state={:?} stack={}", s.state, s.stack.len());
-        println!("depth={} dd={} tok={:?}", s.tr.stack.len(), s.delim_depth, st.token);
-        s.ctx.cx.span_warn(*st.span, "hi");
+        //println!("state={:?} stack={}", s.state, s.stack.len());
+        //println!("depth={} dd={} tok={:?}", s.tr.stack.len(), s.delim_depth, st.token);
+        //s.ctx.cx.span_warn(*st.span, "hi");
         match replace(&mut s.state, State::Dummy) {
             State::Null => {
                 match st.token {
@@ -685,7 +689,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                                     let new_name = mutate_name(ident, call.args.iter().map(|arg| arg.as_ref()));
                                     *ident = new_name;
                                 },
-                                _ => xunreachable!(),
+                                _ => unreachable!(),
                             }
                         }
                         continue_next_pop!();
@@ -723,7 +727,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
 
                                         }
                                     },
-                                    _ => xunreachable!(),
+                                    _ => unreachable!(),
                                 };
                             },
                             _ => {
@@ -735,16 +739,21 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                         continue_same!(State::Null);
                     },
                     &token::CloseDelim(_) => {
-                        println!("decl closedelim: {:?}", decl);
+                        //println!("decl closedelim: {:?}", decl);
                         if decl.args.iter().any(|arg| arg.name.is_some() || arg.is_default) {
                             let args_end = s.tr.mark_next();
                             let new_full_name: ast::Ident;
                             let old_name: ast::Ident;
-                            if let TokenTree::Token(_, token::Ident(ref mut ident)) = *s.tr.mutate_mark(decl.name) {
-                                old_name = *ident;
-                                new_full_name = mutate_name(ident, decl.args.iter().map(|arg| arg.name.as_ref()));
-                                *ident = new_full_name;
-                            } else { xunreachable!(); }
+                            {
+                                let name = s.tr.mutate_mark(decl.name);
+                                if let TokenTree::Token(_, token::Ident(ref mut ident)) = *name {
+                                    old_name = *ident;
+                                    new_full_name = mutate_name(ident, decl.args.iter().map(|arg| arg.name.as_ref()));
+                                    *ident = new_full_name;
+                                } else {
+                                    panic!("?? {:?}", name);
+                                }
+                            }
                             // generate stubs for default arguments
                             if decl.args.iter().any(|arg| arg.is_default) {
                                 push(&mut s, State::DeclEnd { decl: decl, etc: Box::new((
@@ -799,6 +808,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                         for num_include in 0..default_count {
                             gen_default_stub(s.tr, &decl.args, num_include, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name);
                         }
+                        continue_next_pop!();
                     },
                     &Token::OpenDelim(DelimToken::Brace) => {
                         push(&mut s, State::DeclEnd { decl: decl, etc: etc });
@@ -881,7 +891,7 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                 }
                 continue_next!(State::SeekingSemiOrOpenBrace);
             },
-            State::Dummy => xunreachable!(),
+            State::Dummy => unreachable!(),
         }
         st = st_or_return!();
     }
@@ -894,7 +904,7 @@ fn expand_namedarg<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree]
     let mut ctx = Context { cx: cx };
     do_transform(&mut tr, &mut ctx);
     let output = tr.output_as_slice();
-    println!("==> {}", pprust::tts_to_string(output));
+    //println!("==> {}", pprust::tts_to_string(output));
     passthrough_items(ctx.cx, output)
 }
 
