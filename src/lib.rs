@@ -87,8 +87,8 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
         }
     }
     fn get(&self, start: Mark, end: Mark) -> &[TokenTree] {
-        assert_eq!(start.cur_stack_depth, self.tr.stack.len());
-        assert_eq!(end.cur_stack_depth, self.tr.stack.len());
+        self.tr.check_mark(start);
+        self.tr.check_mark(end);
         let output0 = self.output_stack.get(0).unwrap_or(&self.output);
         &output0[start.cur_offset..end.cur_offset]
     }
@@ -97,8 +97,8 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
         //println!("CFMR: have {:?}",self.output);
         let to_add: Vec<TokenTree> = {
             let x: &[TokenTree] = if let Some(enter) = enter {
-                assert_eq!(start.cur_stack_depth, self.tr.stack.len() + 1);
-                assert_eq!(end.cur_stack_depth, self.tr.stack.len() + 1);
+                self.tr.check_mark_plus1(start);
+                self.tr.check_mark_plus1(end);
                 let mut enter_plus = enter;
                 enter_plus.cur_offset += 1;
                 let inner = &self.get(enter, enter_plus)[0];
@@ -129,12 +129,12 @@ struct SpanToken<'a> {
     token: &'a Token,
 }
 
-struct TTReader<'a> {
+pub struct TTReader<'a> {
     stack: Vec<(&'a [TokenTree], &'a [TokenTree], Option<Vec<TokenTree>>)>,
     whole: &'a [TokenTree],
     cur: &'a [TokenTree],
     cur_offset: usize,
-    output: Option<Vec<TokenTree>>,
+    pub output: Option<Vec<TokenTree>>,
     token_storage: &'a UnsafeCell<Token>,
 }
 
@@ -162,7 +162,7 @@ impl Mark {
 */
 
 impl<'a> TTReader<'a> {
-    fn new(initial: &'a [TokenTree], token_storage: &'a UnsafeCell<Token>) -> Self {
+    pub fn new(initial: &'a [TokenTree], token_storage: &'a UnsafeCell<Token>) -> Self {
         TTReader {
             stack: Vec::new(),
             whole: initial,
@@ -172,7 +172,7 @@ impl<'a> TTReader<'a> {
             token_storage: token_storage,
         }
     }
-    fn output_as_slice(&self) -> &[TokenTree] {
+    pub fn output_as_slice(&self) -> &[TokenTree] {
         if let Some(ref output) = self.output {
             &output[..]
         } else {
@@ -333,10 +333,36 @@ impl<'a> TTReader<'a> {
     }
     #[cfg(not(debug_assertions))]
     fn check_mark(&self, _: Mark) {}
+    #[cfg(debug_assertions)]
+    fn check_mark_plus1(&self, mark: Mark) {
+        assert_eq!(mark.cur_stack_depth, self.stack.len() + 1);
+    }
+    #[cfg(not(debug_assertions))]
+    fn check_mark_plus1(&self, _: Mark) {}
 }
 
-struct Context<'x, 'y: 'x> {
-    cx: &'x mut ExtCtxt<'y>
+pub trait ExtCtxtish {
+    fn span_err(&self, sp: Span, msg: &str);
+    fn span_warn(&self, sp: Span, msg: &str);
+}
+
+impl<'a> ExtCtxtish for ExtCtxt<'a> {
+    fn span_err(&self, sp: Span, msg: &str) { ExtCtxt::span_err(self, sp, msg) }
+    fn span_warn(&self, sp: Span, msg: &str) { ExtCtxt::span_warn(self, sp, msg) }
+}
+
+pub struct FakeExtCtxt;
+impl ExtCtxtish for FakeExtCtxt {
+    fn span_err(&self, _sp: Span, msg: &str) {
+        println!("<err> {}", msg);
+    }
+    fn span_warn(&self, _sp: Span, msg: &str) {
+        println!("<warn> {}", msg);
+    }
+}
+
+pub struct Context<'x, EC: ExtCtxtish + 'x> {
+    pub cx: &'x mut EC
 }
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
 enum State {
@@ -355,6 +381,7 @@ enum State {
         /*args_end*/      Mark,
     )> },
     SeekingSemiOrOpenBrace,
+    ExcessCloses,
     Dummy,
 }
 struct StackEntry {
@@ -382,8 +409,8 @@ struct DeclArg {
     ty_end: Option<Mark>,
     is_default: bool,
 }
-struct Stuff<'x, 'y: 'x, 'z: 'y, 'a: 'x> {
-    ctx: &'x mut Context<'y, 'z>,
+struct Stuff<'x, 'y: 'x, 'a: 'x, EC: ExtCtxtish + 'y> {
+    ctx: &'x mut Context<'y, EC>,
     state: State,
     delim_depth: usize,
     tr: &'x mut TTReader<'a>,
@@ -458,13 +485,13 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: us
     tw.finish();
 }
 
-fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>) {
+pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, EC>) {
     let default_name = token::intern("default");
-    let mut s: Stuff = Stuff {
+    let mut s = Stuff {
         state: State::Null,
         delim_depth: 0,
         tr: tr,
-        stack: Vec::new(),
+        stack: vec![StackEntry { state: State::ExcessCloses, delim_depth: 0 }],
         ctx: ctx,
     };
     let xsp = &mut s.state as *mut State;
@@ -490,26 +517,30 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
     macro_rules! continue_next_pop { () => { continue_next!(pop(&mut s)) } }
     macro_rules! continue_same_pop { () => { continue_same!(pop(&mut s)) } }
     #[inline(always)]
-    fn push<'x, 'y, 'z, 'a>(s: &mut Stuff<'x, 'y, 'z, 'a>, state: State) {
+    fn push<'x, 'y, 'a, EC: ExtCtxtish + 'y>(s: &mut Stuff<'x, 'y, 'a, EC>, state: State) {
         s.stack.push(StackEntry { state: state, delim_depth: s.delim_depth });
         s.delim_depth = 0;
     }
     #[inline(always)]
-    fn pop<'x, 'y, 'z, 'a>(s: &mut Stuff<'x, 'y, 'z, 'a>) -> State {
+    fn pop<'x, 'y, 'a, EC: ExtCtxtish + 'y>(s: &mut Stuff<'x, 'y, 'a, EC>) -> State {
         if let Some(entry) = s.stack.pop() {
             s.delim_depth = entry.delim_depth;
             entry.state
         } else {
-            println!("popped out of last state");
-            s.delim_depth = 0;
-            State::Null
+            panic!("popped out of last state");
         }
     }
     st = st_or_return!();
     loop {
-        //println!("state={:?} stack={}", s.state, s.stack.len());
-        //println!("depth={} dd={} tok={:?}", s.tr.stack.len(), s.delim_depth, st.token);
-        //s.ctx.cx.span_warn(*st.span, "hi");
+        #[cfg(feature = "println_spam")]
+        fn println_spam<'x, 'y, 'a, EC: ExtCtxtish + 'y>(s: &mut Stuff<'x, 'y, 'a, EC>, st: &SpanToken<'x>) {
+            println!("stack={} state={:?}", s.stack.len(), s.state);
+            println!("parserdepth={} delim_depth={} tok={:?}", s.tr.stack.len(), s.delim_depth, st.token);
+            s.ctx.cx.span_warn(*st.span, "hi");
+        }
+        #[cfg(not(feature = "println_spam"))]
+        fn println_spam<T, U>(_: T, _: U) {}
+        println_spam(&mut s, &st);
         match replace(&mut s.state, State::Dummy) {
             State::Null => {
                 match st.token {
@@ -580,26 +611,32 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
             },
             State::AfterLt => {
                 match st.token {
+                    // XXX not for braces
                     &token::OpenDelim(_) => {
+                        s.delim_depth += 1;
                         push(&mut s, State::AfterLt);
                         continue_next!(State::Null);
                     },
-                    &token::Lt => {
-                        continue_next!(State::DefinitelyType { angle_depth: 1 });
-                    },
-                    &token::Gt | &token::Comma => {
+                    // Shr should not come up here on valid files
+                    &token::Gt | &token::Comma | &token::BinOp(token::Shr) => {
                         continue_next!(State::Null);
                     },
+                    &token::Lt => {
+                        push(&mut s, State::Null);
+                        continue_next!(State::DefinitelyType { angle_depth: 1 });
+                    },
                     &token::Colon => {
+                        push(&mut s, State::Null);
                         continue_next!(State::DefinitelyType { angle_depth: 0 });
                     },
                     &token::Ident(ref ident) => {
                         if ident.name == keywords::As.name() {
+                            push(&mut s, State::Null);
                             continue_next!(State::DefinitelyType { angle_depth: 0 });
                         }
                     },
                     &token::CloseDelim(_) => {
-                        continue_same_pop!();
+                        continue_same!(State::Null);
                     },
                     _ => (),
                 }
@@ -715,6 +752,8 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                     prev_arg.ty_end = Some(s.tr.mark_last());
                 }
                 match st.token {
+                    &token::Ident(ident) if ident.name == keywords::Ref.name() ||
+                                            ident.name == keywords::Mut.name() => (),
                     &Token::Underscore | &token::Ident(_) => {
                         let to_delete = s.tr.mark_last();
                         let st2 = st_or_return!();
@@ -792,17 +831,13 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                                 } else { st = st3; }
                             } else { st = st3; }
                         } else { st = st2; }
-                        decl.args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default });
-                        push(&mut s, State::DeclArgStart { decl: decl, pending_default: false });
-                        continue_same!(State::Null);
                     },
                     &token::Comma => continue_next!(State::DeclArgStart { decl: decl, pending_default: false }),
-                    _ => {
-                        decl.args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default });
-                        push(&mut s, State::DeclArgStart { decl: decl, pending_default: false });
-                        continue_same!(State::Null);
-                    },
+                    _ => (),
                 }
+                decl.args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default });
+                push(&mut s, State::DeclArgStart { decl: decl, pending_default: false });
+                continue_same!(State::Null);
             },
             State::DeclEnd { decl, etc } => {
                 // only get here if we need defaults
@@ -828,11 +863,22 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                     &token::Lt => {
                         angle_depth += 1;
                     },
-                    &token::Gt => {
-                        if angle_depth == 0 {
-                            s.ctx.cx.span_err(*st.span, "'>' without '<'. possible parser bug");
+                    &token::Gt | &token::BinOp(token::Shr) => {
+                        let decr = if *st.token == token::Gt { 1 } else { 2 };
+                        if angle_depth < decr {
+                            if decr == 2 && angle_depth == 1 {
+                                // yuck
+                                unsafe {
+                                    let ptr = s.tr.token_storage.get();
+                                    *ptr = token::Gt;
+                                    st.token = &*ptr;
+                                }
+                                angle_depth = 0;
+                            } else {
+                                s.ctx.cx.span_err(*st.span, "'>' without '<'. possible parser bug");
+                            }
                         } else {
-                            angle_depth -= 1;
+                            angle_depth -= decr;
                         }
                         if angle_depth == 0 {
                             if s.delim_depth > 0 {
@@ -896,6 +942,11 @@ fn do_transform<'x, 'y, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, 'y>
                     _ => ()
                 }
                 continue_next!(State::SeekingSemiOrOpenBrace);
+            },
+            State::ExcessCloses => {
+                s.ctx.cx.span_err(*st.span, "excess close delimeters");
+                push(&mut s, State::ExcessCloses);
+                continue_next!(State::Null);
             },
             State::Dummy => unreachable!(),
         }

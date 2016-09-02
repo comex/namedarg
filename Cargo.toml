@@ -9,5 +9,5 @@ authors = ["comex <comexk@gmail.com>"]
 crate-type = ["dylib"]
 
 [features]
-# this is only for temporary testing
 derive_debug = []
+println_spam = ["derive_debug"]
