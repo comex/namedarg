@@ -1,7 +1,7 @@
 #![feature(rustc_private)]
 #[allow(plugin_as_library)]
 extern crate namedarg;
-use namedarg::{TTReader, do_transform, Context, FakeExtCtxt};
+use namedarg::{TTReader, do_transform, Context};
 extern crate syntax;
 use syntax::print::pprust;
 use syntax::parse::{ParseSess, token, filemap_to_tts};
@@ -28,7 +28,7 @@ fn main() {
 
     let token_storage = UnsafeCell::new(token::DotDot);
     let mut tr = TTReader::new(&tts, &token_storage);
-    let mut ctx = Context { cx: &mut FakeExtCtxt::new() };
+    let mut ctx = Context { cx: &ps.span_diagnostic };
     do_transform(&mut tr, &mut ctx);
     let time_2 = Instant::now();
     println!("parse:{} transform:{}", nanos(time_1 - time_0), nanos(time_2 - time_1));
@@ -37,7 +37,7 @@ fn main() {
         write_to_file("/tmp/ppa", &pprust::tts_to_string(&tts));
         write_to_file("/tmp/ppb", &pprust::tts_to_string(tr.output_as_slice()));
         std::process::exit(1);
-    } else if ctx.cx.any_errs.get() {
+    } else if ctx.cx.err_count() > 0 {
         println!("{}: got errors", filename);
         std::process::exit(1);
     } else {
