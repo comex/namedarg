@@ -348,12 +348,6 @@ pub struct Context<'x, EC: ExtCtxtish + 'x> {
     pub cx: &'x EC
 }
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
-enum DefinitelyTypeSubstate {
-    Other,
-    StartOfType,
-    IdentAfterStartOfType,
-}
-#[cfg_attr(feature = "derive_debug", derive(Debug))]
 enum State {
     Null { after_lt: bool }, // pops on , or closing delim, not skipping
     GotIdent { ident: Mark, after_lt: bool },
@@ -368,7 +362,7 @@ enum State {
         /*args_end*/      Mark,
     )> },
     SeekingSemiOrOpenBrace,
-    DefinitelyType { angle_depth: usize, substate: DefinitelyTypeSubstate }, // pops on closing >, skipping it
+    DefinitelyType { angle_depth: usize, eager_exit: bool, start_of_type: bool }, // pops on closing >, skipping it
     ExcessCloses,
     Dummy,
 }
@@ -538,7 +532,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             continue_next!(State::GotFn { after_lt: after_lt });
                         } else if ident.name == keywords::As.name() {
                             push(&mut s, State::Null { after_lt: after_lt });
-                            continue_next!(State::DefinitelyType { angle_depth: 0, substate: DefinitelyTypeSubstate::StartOfType });
+                            continue_next!(State::DefinitelyType { angle_depth: 0, eager_exit: false, start_of_type: true });
                         } else {
                             continue_next!(State::GotIdent { after_lt: after_lt, ident: s.tr.mark_last() });
                         }
@@ -580,7 +574,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             }
                             if is_paren {
                                 push(&mut s, State::Null { after_lt: false });
-                                continue_next!(State::DefinitelyType { angle_depth: 0, substate: DefinitelyTypeSubstate::StartOfType });
+                                continue_next!(State::DefinitelyType { angle_depth: 0, eager_exit: false, start_of_type: true });
                             }
                         }
                     },
@@ -596,7 +590,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         // generic parameters, doesn't fit the above syntax.
                         if after_lt && s.delim_depth == 0 {
                             push(&mut s, State::Null { after_lt: false });
-                            continue_next!(State::DefinitelyType { angle_depth: 2, substate: DefinitelyTypeSubstate::StartOfType });
+                            continue_next!(State::DefinitelyType { angle_depth: 2, eager_exit: true, start_of_type: false });
                         } else {
                             push(&mut s, State::Null { after_lt: false });
                             continue_next!(State::Null { after_lt: true });
@@ -638,7 +632,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     &token::Lt => {
                         // ::< means we weren't in a type to start with
                         push(&mut s, State::GotIdent { ident: ident, after_lt: false });
-                        continue_next!(State::DefinitelyType { angle_depth: 1, substate: DefinitelyTypeSubstate::StartOfType });
+                        continue_next!(State::DefinitelyType { angle_depth: 1, eager_exit: true, start_of_type: true });
                     },
                     _ => continue_same!(State::Null { after_lt: after_lt }),
                 }
@@ -660,7 +654,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     &token::Lt => {
                         let state = State::GotFnName { name: name, generic_start: Some(s.tr.mark_last()) };
                         push(&mut s, state);
-                        continue_next!(State::DefinitelyType { angle_depth: 1, substate: DefinitelyTypeSubstate::StartOfType });
+                        continue_next!(State::DefinitelyType { angle_depth: 1, eager_exit: true, start_of_type: true });
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
                         push(&mut s, State::Null { after_lt: false });
@@ -830,16 +824,20 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     _ => panic!("unexpected token at decl end"),
                 }
             }
-            State::DefinitelyType { mut angle_depth, substate } => {
+            State::DefinitelyType { mut angle_depth, eager_exit, start_of_type } => {
+                let mut new_start_of_type = false;
                 match st.token {
                     &token::Lt => {
                         angle_depth += 1;
-                        continue_next!(State::DefinitelyType { angle_depth: angle_depth });
+                        new_start_of_type = true;
                     },
                     &token::Gt if angle_depth > 0 => {
                         angle_depth -= 1;
                         if angle_depth == 0 && s.delim_depth != 0 {
                             s.ctx.cx.span_err(*st.span, "unexpected '>' misnested w.r.t. ()[]{}. possible parser bug");
+                        }
+                        if angle_depth == 0 && eager_exit {
+                            continue_next_pop!();
                         }
                     },
                     &token::BinOp(token::Shr) if angle_depth > 0 => {
@@ -857,12 +855,13 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         if angle_depth == 0 && s.delim_depth != 0 {
                             s.ctx.cx.span_err(*st.span, "unexpected '>' misnested w.r.t. ()[]{}. possible parser bug");
                         }
+                        if angle_depth == 0 && eager_exit {
+                            continue_next_pop!();
+                        }
                     },
-                    &token::OpenDelim(DelimToken::Bracket) | &token::OpenDelim(DelimToen::Paren) => {
+                    &token::OpenDelim(DelimToken::Bracket) | &token::OpenDelim(DelimToken::Paren) => {
                         s.delim_depth += 1;
-                    },
-                    &token::OpenDelim(DelimToken::Paren) if substate == DefinitelyTypeSubstate::IdentAfterStartOfType => {
-                        s.delim_depth += 1;
+                        new_start_of_type = true;
                     },
                     &token::CloseDelim(_) => {
                         if s.delim_depth != 0 {
@@ -876,27 +875,21 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         }
                     },
                     // tokens allowed in a type
-                    &token::Ident(ident) => {
-                        continue_next!(State::DefinitelyType {
-                            angle_depth: angle_depth,
-                            substate: if substate == DefinitelyTypeSubstate::StartOfType {
-                                DefinitelyTypeSubstate::IdentAfterStartOfType
-                            } else {
-                                DefinitelyTypeSubstate::Other
-                            },
-                        );
-                    },
+                    &token::Ident(_) |
                     &token::ModSep | &token::Lifetime(_) | &token::Underscore | &token::RArrow |
-                    &token::BinOp(token::And) | &token::BinOp(token::Star) |
-                    &token::BinOp(token::Plus) | &token::Question => (),
+                    &token::Question => (),
                     // tokens allowed inside other things
                     &token::Semi if s.delim_depth != 0 => {
                         // inside an array decl, puts us into expression context
-                        push(&mut s, State::DefinitelyType { angle_depth: angle_depth, substate: DefinitelyTypeSubstate::Other });
+                        push(&mut s, State::DefinitelyType { angle_depth: angle_depth, eager_exit: eager_exit, start_of_type: false });
                         continue_next!(State::Null { after_lt: false });
                     },
-                    &token::Comma | &token::Colon | &token::Eq if
-                        s.delim_depth != 0 || angle_depth != 0 => (),
+                    &token::Comma | &token::Colon | &token::Eq | &token::BinOp(token::Plus) if
+                        s.delim_depth != 0 || angle_depth != 0 => {
+                        new_start_of_type = true;
+                    },
+                    // tokens allowed at start
+                    &token::BinOp(token::And) | &token::BinOp(token::Star) if start_of_type => (),
                     // anything else ends the type
                     _ => {
                         if angle_depth == 0 && s.delim_depth == 0 {
@@ -906,7 +899,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         }
                     },
                 }
-                continue_next!(State::DefinitelyType { angle_depth: angle_depth, substate: DefinitelyTypeSubstate::Other });
+                continue_next!(State::DefinitelyType { angle_depth: angle_depth, eager_exit: eager_exit, start_of_type: new_start_of_type });
             },
             State::SeekingSemiOrOpenBrace => {
                 match st.token {

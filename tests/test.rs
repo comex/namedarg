@@ -27,4 +27,11 @@ namedarg! {
         assert_eq!(default_func(x: 0, (1, 1)), 5);
         assert_eq!(generic_default_func::<i32>(), 123);
     }
+
+    #[test]
+    fn test_untransformed() {
+        let xs = [1, 2, 3];
+        let res = xs.into_iter().fold(0, |a: usize, b: usize| 10 * a + b);
+        assert_eq!(res, 123);
+    }
 }
