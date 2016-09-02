@@ -551,7 +551,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
         fn println_spam<T, U>(_: T, _: U) {}
         println_spam(&mut s, &st);
         match replace(&mut s.state, State::Dummy) {
-            State::Null { after_lt } => {
+            State::Null { mut after_lt } => {
                 match st.token {
                     &token::Ident(ref ident) => {
                         // XXX trait, attr
@@ -564,8 +564,11 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             continue_next!(State::GotIdent { after_lt: after_lt, ident: s.tr.mark_last() });
                         }
                     },
-                    &token::OpenDelim(_) => {
+                    &token::OpenDelim(delim) => {
                         s.delim_depth += 1;
+                        if delim == DelimToken::Brace {
+                            after_lt = false;
+                        }
                     },
                     &token::CloseDelim(_) => {
                         if s.delim_depth == 0 {
@@ -621,7 +624,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         }
                     },
                     &token::Gt | &token::BinOp(token::Shr) => {
-                        continue_next!(State::Null { after_lt: false });
+                        after_lt = false;
                     },
                     _ => (),
                 }
@@ -879,11 +882,6 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             continue_next_pop!();
                         }
                     },
-                    &token::Comma | &token::BinOp(_) | &token::Dot | &token::Le | &token::Ge | &token::EqEq | &token::DotDot => {
-                        if angle_depth == 0 && s.delim_depth == 0 {
-                            continue_same_pop!();
-                        }
-                    },
                     &token::Semi => {
                         // only valid inside an array decl, puts us into expression context
                         if s.delim_depth != 0 {
@@ -918,7 +916,12 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             continue_same_pop!();
                         }
                     },
-                    _ => ()
+                    &token::Ident(_) | &token::ModSep | &token::Lifetime(_) | &token::Underscore | &token::RArrow => (),
+                    _ => {
+                        if from_as && angle_depth == 0 && s.delim_depth == 0 {
+                            continue_same_pop!();
+                        }
+                    },
                 }
                 continue_next!(State::DefinitelyType { angle_depth: angle_depth, from_as: from_as });
             },
