@@ -376,12 +376,10 @@ pub struct Context<'x, EC: ExtCtxtish + 'x> {
 }
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
 enum State {
-    Null, // pops on , or closing delim, not skipping
-    DefinitelyType { angle_depth: usize }, // pops on closing >, skipping it
-    AfterLt,
-    GotIdent(Mark),
-    GotIdentColonColon(Mark),
-    GotFn,
+    Null { after_lt: bool }, // pops on , or closing delim, not skipping
+    GotIdent { ident: Mark, after_lt: bool },
+    GotIdentColonColon { ident: Mark, after_lt: bool },
+    GotFn { after_lt: bool },
     GotFnName { name: Mark, generic_start: Option<Mark> },
     CallArgStart(CallStuff), // skips
     DeclArgStart { decl: DeclStuff, pending_default: bool }, // skips
@@ -391,6 +389,7 @@ enum State {
         /*args_end*/      Mark,
     )> },
     SeekingSemiOrOpenBrace,
+    DefinitelyType { angle_depth: usize }, // pops on closing >, skipping it
     ExcessCloses,
     Dummy,
 }
@@ -498,7 +497,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: us
 pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, EC>) {
     let default_name = token::intern("default");
     let mut s = Stuff {
-        state: State::Null,
+        state: State::Null { after_lt: false },
         delim_depth: 0,
         tr: tr,
         stack: vec![StackEntry { state: State::ExcessCloses, delim_depth: 0 }],
@@ -552,17 +551,17 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
         fn println_spam<T, U>(_: T, _: U) {}
         println_spam(&mut s, &st);
         match replace(&mut s.state, State::Dummy) {
-            State::Null => {
+            State::Null { after_lt } => {
                 match st.token {
                     &token::Ident(ref ident) => {
                         // XXX trait, attr
                         if ident.name == keywords::Fn.name() {
-                            continue_next!(State::GotFn);
+                            continue_next!(State::GotFn { after_lt: after_lt });
                         } else if ident.name == keywords::As.name() {
-                            push(&mut s, State::Null);
+                            push(&mut s, State::Null { after_lt: after_lt });
                             continue_next!(State::DefinitelyType { angle_depth: 0 });
                         } else {
-                            continue_next!(State::GotIdent(s.tr.mark_last()));
+                            continue_next!(State::GotIdent { after_lt: after_lt, ident: s.tr.mark_last() });
                         }
                     },
                     &token::OpenDelim(_) => {
@@ -586,7 +585,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             // we do need to catch movement into type mode directly within parens,
                             // because of foo(a: b as c<d, e>::f)
                             // if this isn't directly within parens, it could be a struct literal,
-                            // which is harder to deal with
+                            // which is harder to deal with, and unnecessary
                             match s.stack.last_mut() {
                                 Some(&mut StackEntry { state: State::DeclArgStart { ref mut decl, .. }, .. }) => {
                                     decl.args.last_mut().unwrap().ty_start = Some(s.tr.mark_last());
@@ -598,7 +597,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                                 _ => { is_paren = false; },
                             }
                             if is_paren {
-                                push(&mut s, State::Null);
+                                push(&mut s, State::Null { after_lt: false });
                                 continue_next!(State::DefinitelyType { angle_depth: 0 });
                             }
                         }
@@ -613,49 +612,25 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         // should ignore commas until we see the matching >.  If we see a comma, we
                         // have to be in an expression, because '<T1, T2>', while valid as a set of
                         // generic parameters, doesn't fit the above syntax.
-                        continue_next!(State::AfterLt);
-                    },
-                    _ => (),
-                }
-                continue_next!(State::Null);
-            },
-            State::AfterLt => {
-                match st.token {
-                    // XXX not for braces
-                    &token::OpenDelim(_) => {
-                        s.delim_depth += 1;
-                        push(&mut s, State::AfterLt);
-                        continue_next!(State::Null);
-                    },
-                    // Shr should not come up here on valid files
-                    &token::Gt | &token::Comma | &token::BinOp(token::Shr) => {
-                        continue_next!(State::Null);
-                    },
-                    &token::Lt => {
-                        push(&mut s, State::Null);
-                        continue_next!(State::DefinitelyType { angle_depth: 2 });
-                    },
-                    &token::Colon => {
-                        push(&mut s, State::Null);
-                        continue_next!(State::DefinitelyType { angle_depth: 1 });
-                    },
-                    &token::Ident(ref ident) => {
-                        if ident.name == keywords::As.name() {
-                            push(&mut s, State::Null);
-                            continue_next!(State::DefinitelyType { angle_depth: 1 });
+                        if after_lt && s.delim_depth == 0 {
+                            push(&mut s, State::Null { after_lt: false });
+                            continue_next!(State::DefinitelyType { angle_depth: 2 });
+                        } else {
+                            push(&mut s, State::Null { after_lt: false });
+                            continue_next!(State::Null { after_lt: true });
                         }
                     },
-                    &token::CloseDelim(_) => {
-                        continue_same!(State::Null);
+                    &token::Gt | &token::BinOp(token::Shr) => {
+                        continue_next!(State::Null { after_lt: false });
                     },
                     _ => (),
                 }
-                continue_next!(State::AfterLt);
+                continue_next!(State::Null { after_lt: after_lt });
             },
-            State::GotIdent(name) => {
+            State::GotIdent { ident, after_lt } => {
                 match st.token {
                     &token::ModSep => {
-                        continue_next!(State::GotIdentColonColon(name));
+                        continue_next!(State::GotIdentColonColon { ident: ident, after_lt: after_lt });
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
                         // Note: since Null can be either an expression or a type/trait, Fn traits
@@ -665,32 +640,33 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         // (associated types need an explicitly specified trait)
                         // but it doesn't matter, because 'Fn(a: b)' is not valid, so any valid Fn
                         // traits will be unmodified and so unharmed
-                        push(&mut s, State::Null);
+                        push(&mut s, State::Null { after_lt: after_lt });
                         continue_next!(State::CallArgStart(CallStuff {
-                            name: name,
+                            name: ident,
                             args: Vec::new(),
                         }));
                     },
                     _ => {
-                        continue_same!(State::Null);
+                        continue_same!(State::Null { after_lt: after_lt });
                     },
                 }
             },
-            State::GotIdentColonColon(name) => {
+            State::GotIdentColonColon { ident, after_lt } => {
                 match st.token {
                     &token::Lt => {
-                        push(&mut s, State::GotIdent(name));
+                        // ::< means we weren't in a type to start with
+                        push(&mut s, State::GotIdent { ident: ident, after_lt: false });
                         continue_next!(State::DefinitelyType { angle_depth: 1 });
                     },
-                    _ => continue_same!(State::Null),
+                    _ => continue_same!(State::Null { after_lt: after_lt }),
                 }
             },
-            State::GotFn => {
+            State::GotFn { after_lt } => {
                 match st.token {
                     &token::Ident(_) => {
                         continue_next!(State::GotFnName { name: s.tr.mark_last(), generic_start: None });
                     },
-                    _ => continue_same!(State::Null),
+                    _ => continue_same!(State::Null { after_lt: after_lt }),
                 }
             },
             State::GotFnName { name, generic_start } => {
@@ -701,7 +677,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         continue_next!(State::DefinitelyType { angle_depth: 1 });
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
-                        push(&mut s, State::Null);
+                        push(&mut s, State::Null { after_lt: false });
                         continue_next!(State::DeclArgStart {
                             decl: DeclStuff {
                                 name: name,
@@ -713,7 +689,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             pending_default: false,
                         });
                     },
-                    _ => continue_same!(State::Null),
+                    _ => continue_same!(State::Null { after_lt: false }),
                 }
             },
             State::CallArgStart(mut call) => {
@@ -725,12 +701,12 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             call.args.push(Some(*ident));
                             s.tr.delete_from_mark(mark, 2);
                             push(&mut s, State::CallArgStart(call));
-                            continue_next!(State::Null);
+                            continue_next!(State::Null { after_lt: false });
                         } else {
                             call.args.push(None);
                             push(&mut s, State::CallArgStart(call));
                             st = st2;
-                            continue_same!(State::GotIdent(s.tr.mark_last()));
+                            continue_same!(State::GotIdent { ident: s.tr.mark_last(), after_lt: false });
                         }
                     },
                     &token::CloseDelim(_) => {
@@ -753,7 +729,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     _ => {
                         call.args.push(None);
                         push(&mut s, State::CallArgStart(call));
-                        continue_same!(State::Null);
+                        continue_same!(State::Null { after_lt: false });
                     }
                 }
             },
@@ -791,7 +767,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             },
                         }
                         push(&mut s, State::DeclArgStart { decl: decl, pending_default: pending_default });
-                        continue_same!(State::Null);
+                        continue_same!(State::Null { after_lt: false });
                     },
                     &token::CloseDelim(_) => {
                         //println!("decl closedelim: {:?}", decl);
@@ -847,7 +823,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                 }
                 decl.args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default });
                 push(&mut s, State::DeclArgStart { decl: decl, pending_default: false });
-                continue_same!(State::Null);
+                continue_same!(State::Null { after_lt: false });
             },
             State::DeclEnd { decl, etc } => {
                 // only get here if we need defaults
@@ -863,7 +839,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     },
                     &Token::OpenDelim(DelimToken::Brace) => {
                         push(&mut s, State::DeclEnd { decl: decl, etc: etc });
-                        continue_next!(State::Null);
+                        continue_next!(State::Null { after_lt: false });
                     },
                     _ => panic!("unexpected token at decl end"),
                 }
@@ -901,7 +877,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             continue_next_pop!();
                         }
                     },
-                    &token::Comma => {
+                    &token::Comma | &token::BinOp(_) | &token::Dot | &token::Le | &token::Ge => {
                         if angle_depth == 0 && s.delim_depth == 0 {
                             continue_same_pop!();
                         }
@@ -909,7 +885,16 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     &token::Semi => {
                         // only valid inside an array decl, puts us into expression context
                         push(&mut s, State::DefinitelyType { angle_depth: angle_depth });
-                        continue_next!(State::Null);
+                        continue_next!(State::Null { after_lt: false });
+                    },
+                    &token::Literal(..) => {
+                        s.ctx.cx.span_err(*st.span, "supposed to be in a type but we got a literal. possible parser bug");
+                    },
+                    &token::OpenDelim(DelimToken::Brace) => {
+                        if angle_depth == 0 && s.delim_depth == 0 {
+                            continue_same_pop!();
+                        }
+                        s.ctx.cx.span_err(*st.span, "supposed to be in a type but we got a brace. possible parser bug");
                     },
                     &token::OpenDelim(_) => {
                         s.delim_depth += 1;
@@ -920,7 +905,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         } else {
                             if angle_depth != 0 {
                                 // similar
-                                s.ctx.cx.span_err(*st.span, "unexpected thingy [todo]. possible parser bug");
+                                s.ctx.cx.span_err(*st.span, "unexpected close delimiter in type. possible parser bug");
                             }
                             continue_same_pop!();
                         }
@@ -939,7 +924,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     &token::OpenDelim(_) => {
                         s.delim_depth += 1;
                         push(&mut s, State::SeekingSemiOrOpenBrace);
-                        continue_next!(State::Null);
+                        continue_next!(State::Null { after_lt: false });
                     },
                     &token::CloseDelim(_) => {
                         if s.delim_depth == 1 {
@@ -956,7 +941,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
             State::ExcessCloses => {
                 s.ctx.cx.span_err(*st.span, "excess close delimeters");
                 push(&mut s, State::ExcessCloses);
-                continue_next!(State::Null);
+                continue_next!(State::Null { after_lt: false });
             },
             State::Dummy => unreachable!(),
         }

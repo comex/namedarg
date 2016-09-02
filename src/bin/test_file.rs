@@ -37,8 +37,8 @@ fn main() {
         write_to_file("/tmp/ppa", &pprust::tts_to_string(&tts));
         write_to_file("/tmp/ppb", &pprust::tts_to_string(tr.output_as_slice()));
         std::process::exit(1);
-    } else if ctx.cx.any_errs.get() || ctx.cx.any_warns.get() {
-        println!("{}: got errors/warnings", filename);
+    } else if ctx.cx.any_errs.get() {
+        println!("{}: got errors", filename);
         std::process::exit(1);
     } else {
         println!("ok");
