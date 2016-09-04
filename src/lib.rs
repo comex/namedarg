@@ -349,7 +349,7 @@ pub struct Context<'x, EC: ExtCtxtish + 'x> {
 }
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
 enum State {
-    Null { expecting_operator: bool }, // pops on , or closing delim, not skipping
+    Null { expecting_operator: bool, in_func_parens: bool }, // pops on , or closing delim, not skipping
     GotIdent { ident: Mark },
     GotIdentColonColon { ident: Mark },
     GotFn,
@@ -532,7 +532,10 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     &token::Ident(ref ident) => {
                         // XXX trait, attr
                         let name = ident.name;
-                        if name.0 >= keywords::Default.name().0 {
+                        if name.0 >= keywords::Default.name().0 ||
+                           name == keywords::SelfValue.name() ||
+                           name == keywords::SelfType.name() ||
+                           name == keywords::Super.name() {
                             continue_next!(State::GotIdent { ident: s.tr.mark_last() });
                         }
                         // this is a keyword
@@ -586,9 +589,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         }
                         expecting_operator = false;
                     },
-                    // XXX struct literal
                     &token::Colon => {
-                        // X
                         if s.delim_depth == 0  {
                             match s.stack.last_mut() {
                                 Some(&mut StackEntry { state: State::DeclArgStart { ref mut decl, .. }, .. }) => {
@@ -611,7 +612,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             expecting_operator = false;
                         } else {
                             push(&mut s, State::Null { expecting_operator: true });
-                            continue_next!(State::DefinitelyType { angle_depth: 2, eager_exit: true, start_of_type: false });
+                            continue_next!(State::DefinitelyType { angle_depth: 1, eager_exit: true, start_of_type: true });
                         }
                     },
                     &token::BinOp(token::Or) if !expecting_operator => {
@@ -671,7 +672,8 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                                 continue_same!(State::Null { expecting_operator: true });
                             }
                         }
-                        // otherwise this is a struct literal
+                        // otherwise this could be a struct literal
+                        s.delim_depth += 1;
                         continue_next!(State::StructLiteral);
                     },
                     _ => {
@@ -886,10 +888,10 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     },
                     &token::Gt if angle_depth > 0 => {
                         angle_depth -= 1;
-                        if angle_depth == 0 && s.delim_depth != 0 {
-                            s.ctx.cx.span_err(*st.span, "unexpected '>' misnested w.r.t. ()[]{}. possible parser bug");
-                        }
                         if angle_depth == 0 && eager_exit {
+                            if s.delim_depth != 0 {
+                                s.ctx.cx.span_err(*st.span, "unexpected '>' misnested w.r.t. ()[]{}. possible parser bug");
+                            }
                             continue_next_pop!();
                         }
                     },
@@ -905,10 +907,10 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         } else {
                             angle_depth -= 2;
                         }
-                        if angle_depth == 0 && s.delim_depth != 0 {
-                            s.ctx.cx.span_err(*st.span, "unexpected '>' misnested w.r.t. ()[]{}. possible parser bug");
-                        }
                         if angle_depth == 0 && eager_exit {
+                            if s.delim_depth != 0 {
+                                s.ctx.cx.span_err(*st.span, "unexpected '>' misnested w.r.t. ()[]{}. possible parser bug");
+                            }
                             continue_next_pop!();
                         }
                     },
@@ -928,9 +930,22 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         }
                     },
                     // tokens allowed in a type
-                    &token::Ident(_) |
-                    &token::ModSep | &token::Lifetime(_) | &token::Underscore | &token::RArrow |
-                    &token::Question => (),
+                    &token::Ident(_) | &token::ModSep | &token::Underscore |
+                    &token::Question | &token::Dollar => (),
+                    &token::Lifetime(_) | &token::RArrow => { new_start_of_type = true; },
+                    &token::Pound => {
+                        let st2 = st_or_return!();
+                        if let &token::OpenDelim(DelimToken::Bracket) = st2.token {
+                            // attribute
+                            s.delim_depth += 1;
+                            push(&mut s, State::DefinitelyType { angle_depth: angle_depth, eager_exit: eager_exit, start_of_type: true });
+                            continue_next!(State::Null { expecting_operator: false });
+                        } else {
+                            s.ctx.cx.span_err(*st.span, "this shouldn't be in a type. possible parser bug");
+                            st = st2;
+                            continue;
+                        }
+                    },
                     // tokens allowed inside other things
                     &token::Semi if s.delim_depth != 0 => {
                         // inside an array decl, puts us into expression context
@@ -948,7 +963,13 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         if angle_depth == 0 && s.delim_depth == 0 {
                             continue_same_pop!();
                         } else {
-                            s.ctx.cx.span_err(*st.span, "this shouldn't be in a type. possible parser bug");
+                            match st.token {
+                                &token::BinOp(token::Star) | &token::BinOp(token::Plus) => (),
+                                _ => {
+                                    s.ctx.cx.span_err(*st.span, "this shouldn't be in a type. possible parser bug");
+                                    continue_same!(State::Null { expecting_operator: false });
+                                },
+                            }
                         }
                     },
                 }
@@ -1021,11 +1042,10 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         // But this might not really be a struct literal.  It could be something like
                         // 'macro_rules! X { }' or 'mod X { }'.
                         // We could try to detect these... <work>
-                        continue_next!(State::Null { expecting_operator: false });
+                        continue_same!(State::Null { expecting_operator: false });
                     },
                 }
-                // also a token
-                continue_same_pop!();
+                unreachable!();
             },
             State::ExcessCloses => {
                 s.ctx.cx.span_err(*st.span, "excess close delimeters. possible parser bug");
