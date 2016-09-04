@@ -1,4 +1,11 @@
 #![feature(plugin_registrar, rustc_private, slice_patterns, relaxed_adts)]
+/*
+Known mishandled cases:
+macro_rules! a {
+    ($x:type) => { foo(x: y as $x < z) }
+    // correct parse depends on whether $x is a type or ident
+}
+*/
 
 #[macro_use]
 extern crate syntax;
@@ -349,7 +356,7 @@ pub struct Context<'x, EC: ExtCtxtish + 'x> {
 }
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
 enum State {
-    Null { expecting_operator: bool, in_func_parens: bool }, // pops on , or closing delim, not skipping
+    Null { expecting_operator: bool }, // pops on , or closing delim, not skipping
     GotIdent { ident: Mark },
     GotIdentColonColon { ident: Mark },
     GotFn,
@@ -364,14 +371,13 @@ enum State {
     SeekingSemiOrOpenBrace,
     DefinitelyType { angle_depth: usize, eager_exit: bool, start_of_type: bool }, // pops on closing >, skipping it
     LambdaEnd,
-    ControlBlock,
-    StructLiteral,
     ExcessCloses,
     Dummy,
 }
 struct StackEntry {
     state: State,
     delim_depth: usize,
+    in_func_parens: bool,
 }
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
 struct CallStuff {
@@ -398,6 +404,7 @@ struct Stuff<'x, 'y: 'x, 'a: 'x, EC: ExtCtxtish + 'y> {
     ctx: &'x mut Context<'y, EC>,
     state: State,
     delim_depth: usize,
+    in_func_parens: bool,
     tr: &'x mut TTReader<'a>,
     stack: Vec<StackEntry>,
 }
@@ -475,8 +482,9 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
     let mut s = Stuff {
         state: State::Null { expecting_operator: false },
         delim_depth: 0,
+        in_func_parens: false,
         tr: tr,
-        stack: vec![StackEntry { state: State::ExcessCloses, delim_depth: 0 }],
+        stack: vec![StackEntry { state: State::ExcessCloses, delim_depth: 0, in_func_parens: false }],
         ctx: ctx,
     };
     let xsp = &mut s.state as *mut State;
@@ -503,13 +511,15 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
     macro_rules! continue_same_pop { () => { continue_same!(pop(&mut s)) } }
     #[inline(always)]
     fn push<'x, 'y, 'a, EC: ExtCtxtish + 'y>(s: &mut Stuff<'x, 'y, 'a, EC>, state: State) {
-        s.stack.push(StackEntry { state: state, delim_depth: s.delim_depth });
+        s.stack.push(StackEntry { state: state, delim_depth: s.delim_depth, in_func_parens: s.in_func_parens });
         s.delim_depth = 0;
+        s.in_func_parens = false;
     }
     #[inline(always)]
     fn pop<'x, 'y, 'a, EC: ExtCtxtish + 'y>(s: &mut Stuff<'x, 'y, 'a, EC>) -> State {
         if let Some(entry) = s.stack.pop() {
             s.delim_depth = entry.delim_depth;
+            s.in_func_parens = entry.in_func_parens;
             entry.state
         } else {
             panic!("popped out of last state");
@@ -542,34 +552,11 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         if name == keywords::Fn.name() {
                             continue_next!(State::GotFn);
                         }
-                        if name == keywords::As.name() ||
-                           name == keywords::Impl.name() ||
-                           name == keywords::Trait.name() ||
-                           name == keywords::Struct.name() ||
-                           name == keywords::Type.name() ||
-                           name == keywords::Where.name() {
-                            // this isn't perfect - some types will still be treated as expressions,
-                            // e.g. in 'type A = B', B
-                            // but this is ok as long as they're not in calls
+                        if name == keywords::As.name() && s.in_func_parens && s.delim_depth == 0 {
                             push(&mut s, State::Null { expecting_operator: true });
                             continue_next!(State::DefinitelyType { angle_depth: 0, eager_exit: false, start_of_type: true });
                         }
-                        if name == keywords::If.name() ||
-                           name == keywords::For.name() ||
-                           name == keywords::Loop.name() ||
-                           name == keywords::Match.name() ||
-                           name == keywords::While.name() {
-                           push(&mut s, State::ControlBlock);
-                           continue_next!(State::Null { expecting_operator: false });
-                        }
                         continue_next!(State::Null { expecting_operator: false });
-                    },
-                    &token::OpenDelim(DelimToken::Brace) if s.delim_depth == 0 => {
-                        while let Some(&StackEntry { state: State::ControlBlock, .. }) = s.stack.last() {
-                            pop(&mut s); // stay in this state
-                        }
-                        s.delim_depth += 1;
-                        expecting_operator = false;
                     },
                     &token::OpenDelim(_) => {
                         s.delim_depth += 1;
@@ -590,20 +577,16 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         expecting_operator = false;
                     },
                     &token::Colon => {
-                        if s.delim_depth == 0  {
+                        if s.delim_depth == 0 && s.in_func_parens {
                             match s.stack.last_mut() {
                                 Some(&mut StackEntry { state: State::DeclArgStart { ref mut decl, .. }, .. }) => {
                                     decl.args.last_mut().unwrap().ty_start = Some(s.tr.mark_last());
                                 },
                                 _ => ()
                             }
+                            push(&mut s, State::Null { expecting_operator: true });
+                            continue_next!(State::DefinitelyType { angle_depth: 0, eager_exit: false, start_of_type: true });
                         }
-                        push(&mut s, State::Null { expecting_operator: true });
-                        continue_next!(State::DefinitelyType { angle_depth: 0, eager_exit: false, start_of_type: true });
-                    },
-                    &token::RArrow => {
-                        push(&mut s, State::Null { expecting_operator: true });
-                        continue_next!(State::DefinitelyType { angle_depth: 0, eager_exit: false, start_of_type: true });
                     },
                     &token::Lt => {
                         // I had a clever scheme to not have to know whether we were expecting an
@@ -611,8 +594,10 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         if expecting_operator {
                             expecting_operator = false;
                         } else {
-                            push(&mut s, State::Null { expecting_operator: true });
-                            continue_next!(State::DefinitelyType { angle_depth: 1, eager_exit: true, start_of_type: true });
+                            if s.delim_depth == 0 && s.in_func_parens {
+                                push(&mut s, State::Null { expecting_operator: true });
+                                continue_next!(State::DefinitelyType { angle_depth: 1, eager_exit: true, start_of_type: true });
+                            }
                         }
                     },
                     &token::BinOp(token::Or) if !expecting_operator => {
@@ -630,7 +615,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     &token::Gt | &token::AndAnd | &token::OrOr | &token::Not | &token::Tilde |
                     &token::BinOp(_) | &token::BinOpEq(_) | &token::At | &token::Dot | &token::DotDot |
                     &token::DotDotDot | &token::Semi | &token::ModSep |
-                    &token::LArrow | &token::FatArrow | &token::Dollar => {
+                    &token::LArrow | &token::RArrow | &token::FatArrow | &token::Dollar => {
                         expecting_operator = false;
                     },
                     &token::Question | &token::Literal(..) | &token::Underscore => {
@@ -661,20 +646,11 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
                         push(&mut s, State::Null { expecting_operator: true });
+                        s.in_func_parens = true;
                         continue_next!(State::CallArgStart(CallStuff {
                             name: ident,
                             args: Vec::new(),
                         }));
-                    },
-                    &token::OpenDelim(DelimToken::Brace) => {
-                        if s.delim_depth == 0 {
-                            if let Some(&StackEntry { state: State::ControlBlock, .. }) = s.stack.last() {
-                                continue_same!(State::Null { expecting_operator: true });
-                            }
-                        }
-                        // otherwise this could be a struct literal
-                        s.delim_depth += 1;
-                        continue_next!(State::StructLiteral);
                     },
                     _ => {
                         continue_same!(State::Null { expecting_operator: true });
@@ -712,6 +688,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
                         push(&mut s, State::Null { expecting_operator: false });
+                        s.in_func_parens = true;
                         continue_next!(State::DeclArgStart {
                             decl: DeclStuff {
                                 name: name,
@@ -774,7 +751,8 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                 }
                 match st.token {
                     &token::Ident(ident) if ident.name == keywords::Ref.name() ||
-                                            ident.name == keywords::Mut.name() => (),
+                                            ident.name == keywords::Mut.name() ||
+                                            ident.name == keywords::Box.name() => (),
                     &Token::Underscore | &token::Ident(_) => {
                         let to_delete = s.tr.mark_last();
                         let st2 = st_or_return!();
@@ -798,7 +776,8 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             },
                             _ => {
                                 // this could just be a type
-                                decl.args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default })
+                                decl.args.push(DeclArg { name: None, ty_start: Some(s.tr.mark_last()), ty_end: None, is_default: pending_default });
+                                st = st2;
                             },
                         }
                         push(&mut s, State::DeclArgStart { decl: decl, pending_default: pending_default });
@@ -930,7 +909,20 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         }
                     },
                     // tokens allowed in a type
-                    &token::Ident(_) | &token::ModSep | &token::Underscore |
+                    &token::Ident(ident) => {
+                        if ident.name == keywords::Extern.name() {
+                            // allow extern "C"
+                            let st2 = st_or_return!();
+                            match st2.token {
+                                &token::Literal(..) => (),
+                                _ => {
+                                    st = st2;
+                                    continue_same!(State::DefinitelyType { angle_depth: angle_depth, eager_exit: eager_exit, start_of_type: false });
+                                },
+                            }
+                        }
+                    },
+                    &token::ModSep | &token::Underscore | &token::Not | 
                     &token::Question | &token::Dollar => (),
                     &token::Lifetime(_) | &token::RArrow => { new_start_of_type = true; },
                     &token::Pound => {
@@ -999,7 +991,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                 }
                 continue_next!(State::SeekingSemiOrOpenBrace);
             },
-            state @ State::LambdaEnd | state @ State::ControlBlock => {
+            state @ State::LambdaEnd => {
                 // these are used as tokens
                 match st.token {
                     &token::Comma => {
@@ -1010,42 +1002,6 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         continue_same!(State::Null { expecting_operator: true });
                     },
                 }
-            },
-            State::StructLiteral => {
-                match st.token {
-                    &token::Comma => {
-                        continue_next!(State::StructLiteral);
-                    },
-                    &token::Ident(_) => {
-                        let st2 = st_or_return!();
-                        match st2.token {
-                            &token::Colon => {
-                                push(&mut s, State::StructLiteral);
-                                continue_next!(State::Null { expecting_operator: false });
-                            },
-                            _ => {
-                                // this could be a pattern, where 'a: a' can be elided to a
-                                st = st2;
-                                continue_same!(State::StructLiteral);
-                            },
-                        }
-                    },
-                    &token::DotDot => {
-                        push(&mut s, State::StructLiteral);
-                        continue_next!(State::Null { expecting_operator: false });
-                    },
-                    &token::CloseDelim(DelimToken::Brace) => {
-                        continue_next!(State::Null { expecting_operator: true });
-                    },
-                    _ => {
-                        // I don't know what this is.
-                        // But this might not really be a struct literal.  It could be something like
-                        // 'macro_rules! X { }' or 'mod X { }'.
-                        // We could try to detect these... <work>
-                        continue_same!(State::Null { expecting_operator: false });
-                    },
-                }
-                unreachable!();
             },
             State::ExcessCloses => {
                 s.ctx.cx.span_err(*st.span, "excess close delimeters. possible parser bug");
