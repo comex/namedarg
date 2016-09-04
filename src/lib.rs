@@ -359,25 +359,49 @@ impl ExtCtxtish for errors::Handler {
 pub struct Context<'x, EC: ExtCtxtish + 'x> {
     pub cx: &'x EC
 }
-#[cfg_attr(feature = "derive_debug", derive(Debug))]
+
+
+macro_rules! derive_sizeof_variant_inner {
+    ($e:ident ; $enum_name:ident ; $variant_name:ident , $($rest:tt)* ) => ({
+        if let &$enum_name::$variant_name = $e { return 0; }
+        derive_sizeof_variant_inner!($e ; $enum_name ; $($rest)*);
+    });
+    ($e:ident ; $enum_name:ident ; $variant_name:ident { $($args:tt)* } , $($rest:tt)* ) => ({
+        #[repr(C)]
+        struct tmp { $($args)* }
+        if let &$enum_name::$variant_name { .. } = $e { return std::mem::size_of::<tmp>(); }
+        derive_sizeof_variant_inner!($e ; $enum_name ; $($rest)*);
+    });
+    ($e:ident ; $enum_name:ident ;) => ()
+}
+macro_rules! derive_sizeof_variant {
+    { enum $enum_name:ident { $($args:tt)* } } => {
+        #[cfg_attr(feature = "derive_debug", derive(Debug))]
+        enum $enum_name { $($args)* }
+        #[inline(always)]
+        fn sizeof_variant(e: &$enum_name) -> usize {
+            derive_sizeof_variant_inner!(e ; $enum_name ; $($args)* );
+            unreachable!()
+        }
+    }
+}
+
+derive_sizeof_variant! {
 enum State {
     Null { expecting_operator: bool }, // pops on , or closing delim, not skipping
     GotIdent { ident: Mark },
     GotIdentColonColon { ident: Mark },
     GotFn,
     GotFnName { name: Mark, generic_start: Option<Mark> },
-    CallArgStart(CallStuff), // skips
+    CallArgStart { call: CallStuff }, // skips
     DeclArgStart { decl: DeclStuff, pending_default: bool }, // skips
-    DeclEnd { decl: DeclStuff, etc: Box<(
-        /*old_name*/      ast::Ident,
-        /*new_full_name*/ ast::Ident,
-        /*args_end*/      Mark,
-    )> },
+    DeclEnd { decl: DeclStuff, old_name: ast::Ident, new_full_name: ast::Ident, args_end: Mark },
     SeekingSemiOrOpenBrace,
     DefinitelyType { angle_depth: usize, eager_exit: bool, start_of_type: bool }, // pops on closing >, skipping it
     LambdaEnd,
     ExcessCloses,
     Dummy,
+}
 }
 struct StackEntry {
     state: State,
@@ -479,7 +503,8 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
     let mut state: State = State::Null { expecting_operator: false };
     let mut delim_depth: usize = 0;
     let mut in_func_parens: bool = false;
-    let mut stack: Vec<StackEntry> = vec![StackEntry { state: State::ExcessCloses, delim_depth: 0, in_func_parens: false }];
+    let mut stuff: Vec<u32> = Vec::new();
+    // XXX push TooMany
     let xsp = &mut state as *mut State;
     let mut st: SpanToken<'a>;
     macro_rules! st_or_return {
@@ -507,7 +532,17 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
         in_func_parens = false;
         let _ = in_func_parens; // avoid warning
     } } }
-    macro_rules! pop { () => { {
+    macro_rules! pop { ($($possible_variants:ident),*) => { {
+        unsafe {
+            let variant: *State = pop_count(1) as *State;
+            let size = sizeof_variant(&*variant) / 4;
+            pop_count(size);
+            match *variant {
+                $(
+
+                )*
+            }
+        }
         let entry = stack.pop().unwrap();
         delim_depth = entry.delim_depth;
         in_func_parens = entry.in_func_parens;
@@ -631,10 +666,10 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     &token::OpenDelim(DelimToken::Paren) => {
                         push!(State::Null { expecting_operator: true });
                         in_func_parens = true;
-                        continue_next!(State::CallArgStart(CallStuff {
+                        continue_next!(State::CallArgStart { call: CallStuff {
                             name: ident,
                             args: Vec::new(),
-                        }));
+                        } });
                     },
                     _ => {
                         continue_same!(State::Null { expecting_operator: true });
@@ -688,7 +723,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     _ => continue_same!(State::Null { expecting_operator: true }),
                 }
             },
-            State::CallArgStart(mut call) => {
+            State::CallArgStart { mut call } => {
                 match st.token {
                     &token::Ident(ref ident) => {
                         let mark = tr.mark_last();
@@ -696,11 +731,11 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         if let &token::Colon = st2.token {
                             call.args.push(Some(*ident));
                             tr.delete_from_mark(mark, 2);
-                            push!(State::CallArgStart(call));
+                            push!(State::CallArgStart { call: call });
                             continue_next!(State::Null { expecting_operator: false });
                         } else {
                             call.args.push(None);
-                            push!(State::CallArgStart(call));
+                            push!(State::CallArgStart { call: call });
                             st = st2;
                             continue_same!(State::GotIdent { ident: tr.mark_last() });
                         }
@@ -720,11 +755,11 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         continue_next!(pop!());
                     },
                     &token::Comma => {
-                        continue_next!(State::CallArgStart(call));
+                        continue_next!(State::CallArgStart { call: call });
                     },
                     _ => {
                         call.args.push(None);
-                        push!(State::CallArgStart(call));
+                        push!(State::CallArgStart { call: call });
                         continue_same!(State::Null { expecting_operator: false });
                     }
                 }
@@ -785,11 +820,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             }
                             // generate stubs for default arguments
                             if decl.args.iter().any(|arg| arg.is_default) {
-                                push!(State::DeclEnd { decl: decl, etc: Box::new((
-                                    old_name,
-                                    new_full_name,
-                                    args_end,
-                                )) });
+                                push!(State::DeclEnd { decl: decl, old_name: old_name, new_full_name: new_full_name, args_end: args_end });
                                 continue_next!(State::SeekingSemiOrOpenBrace);
                             }
                         }
@@ -823,20 +854,19 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                 push!(State::DeclArgStart { decl: decl, pending_default: false });
                 continue_same!(State::Null { expecting_operator: false });
             },
-            State::DeclEnd { decl, etc } => {
+            State::DeclEnd { decl, old_name, new_full_name, args_end } => {
                 // only get here if we need defaults
                 match st.token {
                     &token::Semi | &Token::CloseDelim(DelimToken::Brace) => {
                         let decl_end: Mark = decl.decl_end.unwrap_or_else(|| tr.mark_last());
                         let default_count = decl.args.iter().filter(|arg| arg.is_default).count();
-                        let (old_name, new_full_name, args_end) = *etc;
                         for num_include in 0..default_count {
                             gen_default_stub(tr, &decl.args, num_include, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name);
                         }
                         continue_next!(pop!());
                     },
                     &Token::OpenDelim(DelimToken::Brace) => {
-                        push!(State::DeclEnd { decl: decl, etc: etc });
+                        push!(State::DeclEnd { decl: decl, old_name: old_name, new_full_name: new_full_name, args_end: args_end });
                         continue_next!(State::Null { expecting_operator: false });
                     },
                     _ => panic!("unexpected token at decl end"),
@@ -975,11 +1005,11 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                 }
                 continue_next!(State::SeekingSemiOrOpenBrace);
             },
-            state @ State::LambdaEnd => {
+            State::LambdaEnd => {
                 // these are used as tokens
                 match st.token {
                     &token::Comma => {
-                        push!(state);
+                        push!(State::LambdaEnd);
                         continue_next!(State::Null { expecting_operator: false });
                     },
                     _ => {
