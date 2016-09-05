@@ -3,6 +3,26 @@
 namedarg! {
     use std::str::FromStr;
     use std::fmt::Debug;
+
+    trait NongenericParentTrait : Debug {
+        fn foo(#[default] a a: Option<i32>) {}
+    }
+    trait NongenericNoParentTrait {
+        fn foo(#[default] a a: Option<i32>) {}
+    }
+    trait GenericParentTrait<T> : Debug {
+        fn foo(#[default] a a: Option<T>) {}
+    }
+    trait GenericNoParentTrait<T> {
+        fn foo(#[default] a a: Option<T>) {}
+    }
+    impl<T> GenericNoParentTrait<T> for T {
+        fn foo(#[default] a a: Option<T>) {}
+    }
+    impl NongenericNoParentTrait for i32 {
+        fn foo(#[default] a a: Option<T>) {}
+    }
+
     fn default_func(x x: i32,
                     (y, z): (i32, i32),
                     #[default] k: Option<i32>,
