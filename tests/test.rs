@@ -4,27 +4,34 @@ namedarg! {
     use std::str::FromStr;
     use std::fmt::Debug;
 
+    fn test_ref_pattern(a &x: &i32) -> i32 {
+        x
+    }
+
     trait NongenericParentTrait : Debug {
-        fn foo(#[default] a a: Option<i32>) {}
+        fn foo(#[default] a _: Option<i32>);
     }
     trait NongenericNoParentTrait {
-        fn foo(#[default] a a: Option<i32>) {}
+        fn foo(&mut self, #[default] a _: Option<i32>);
     }
     trait GenericParentTrait<T> : Debug {
-        fn foo(#[default] a a: Option<T>) {}
+        fn foo(#[default] a _: Option<T>) {}
     }
     trait GenericNoParentTrait<T> {
-        fn foo(#[default] a a: Option<T>) {}
+        fn foo(&self, #[default] a _: Option<T>) {}
     }
     impl<T> GenericNoParentTrait<T> for T {
-        fn foo(#[default] a a: Option<T>) {}
+        fn foo(&self, #[default] a _: Option<T>) {}
     }
     impl NongenericNoParentTrait for i32 {
-        fn foo(#[default] a a: Option<i32>) {}
+        fn foo(&mut self, #[default] a _: Option<i32>) {}
     }
     struct Test;
     impl Test {
-        fn foo(#[default] a a: Option<i32>) {}
+        fn foo(self, #[default] a _: Option<i32>) {}
+    }
+    trait TraitUsingBareTypes {
+        fn foo(i32, #[default] a _: Option<i32>) {}
     }
 
     fn default_func(x x: i32,
@@ -50,6 +57,7 @@ namedarg! {
         assert_eq!(default_func(x: 0, (1, 1), Some(2), arg: Some(5)), 9);
         assert_eq!(default_func(x: 0, (1, 1)), 5);
         assert_eq!(generic_default_func::<i32>(), 123);
+        assert_eq!(test_ref_pattern(a: &1), 1);
     }
 
     #[test]

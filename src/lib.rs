@@ -136,6 +136,12 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
         *ptr = replace(&mut self.tr.output, None).unwrap();
         o
     }
+    fn last_normal_token(&mut self) -> Option<&mut Token> {
+        match self.output.last_mut() {
+            Some(&mut TokenTree::Token(_, ref mut token)) => Some(token),
+            _ => None,
+        }
+    }
     fn finish(mut self) {
         assert!(self.output_stack.is_empty());
         self.tr.cur_offset = self.output.len();
@@ -671,11 +677,16 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
         let arg_name = Ident::with_empty_ctxt(token::intern(&format!("x{}", arg_names.len())));
         tw.write(Token::Ident(arg_name));
         arg_names.push(arg_name);
+        tw.write(token::Colon);
         if let (Some(start), Some(end)) = (arg.ty_start, arg.ty_end) {
             tw.copy_from_mark_range(start, end, GetMode::InnerDepth(args_start));
+            if let Some(&mut token::Ident(ref mut ident)) = tw.last_normal_token() {
+                if ident.name == keywords::SelfValue.name() {
+                    *ident = keywords::SelfType.ident();
+                }
+            }
         } else {
             // huh?
-            tw.write(token::Colon);
             tw.write(token::Underscore);
         }
         tw.write(token::Comma);
@@ -833,7 +844,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                             if test.pop_ref::<Common>().variant() == StateVariant::DeclArgStart {
                                 test.pop_ref::<VariantData::DeclArgStart>();
                                 let data = test.pop_ref::<XAndCommon<DeclArg>>();
-                                data.x.ty_start = Some(tr.mark_last());
+                                data.x.ty_start = Some(tr.mark_next());
                             }
                             pushx!(VariantData::Null { expecting_operator: true, after_semi_or_brace: false });
                             continue_next!(State::DefinitelyType { angle_depth: 0, mode: DTMode::InExpr, start_of_type: true });
@@ -1053,9 +1064,23 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                                     _ => unreachable!(),
                                 };
                             },
+                            &token::BinOp(token::And) | &token::BinOp(token::Star) | &token::Underscore => {
+                                // reference/pointer/dontcare patterns
+                                match st.token {
+                                    &token::Ident(ident1) => {
+                                        tr.delete_from_mark(to_delete, 1);
+                                        pushx_manual!(StateVariant::DeclArg, DeclArg { name: Some(ident1), ty_start: None, ty_end: None, is_default: pending_default });
+                                        pushx!(VariantData::DeclArgStart { pending_default: false });
+                                    },
+                                    &Token::Underscore => {
+                                        ctx.cx.span_err(*st.span, "_ should be followed by an ident pattern");
+                                    },
+                                    _ => unreachable!(),
+                                }
+                            },
                             _ => {
                                 // this could just be a type
-                                pushx_manual!(StateVariant::DeclArg, DeclArg { name: None, ty_start: Some(tr.mark_last()), ty_end: None, is_default: pending_default });
+                                pushx_manual!(StateVariant::DeclArg, DeclArg { name: None, ty_start: Some(to_delete), ty_end: None, is_default: pending_default });
                                 pushx!(VariantData::DeclArgStart { pending_default: false });
                                 st = st2;
                             },
