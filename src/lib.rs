@@ -16,7 +16,7 @@ use syntax::tokenstream::{TokenTree, Delimited};
 use syntax::ext::base::{ExtCtxt, MacResult, MacEager};
 use syntax_pos::Span;
 use syntax::ast;
-use syntax::ast::Ident;
+pub use syntax::ast::Ident;
 use syntax::util::small_vector::SmallVector;
 //use syntax::print::pprust;
 use rustc_plugin::registry::Registry;
@@ -24,12 +24,13 @@ use syntax::parse::token;
 use syntax::parse::token::{Token, DelimToken};
 use syntax::parse::token::keywords;
 use std::rc::Rc;
-use std::mem::replace;
+use std::mem::{replace, size_of, transmute};
 use std::cell::UnsafeCell;
+use std::slice;
 
-#[cfg(not(println_spam))]
+#[cfg(not(feature = "println_spam"))]
 macro_rules! if_println_spam { {$($stuff:tt)*} => {} }
-#[cfg(println_spam)]
+#[cfg(feature = "println_spam")]
 macro_rules! if_println_spam { {$($stuff:tt)*} => {$($stuff)*} }
 
 fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
@@ -161,7 +162,7 @@ fn make_cur_stack_depth(_: usize) -> MarkCurStackDepth { () }
 
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
-struct Mark {
+pub struct Mark {
     cur_stack_depth: MarkCurStackDepth,
     cur_offset: usize,
 }
@@ -361,76 +362,211 @@ pub struct Context<'x, EC: ExtCtxtish + 'x> {
 }
 
 
-macro_rules! derive_sizeof_variant_inner {
-    ($e:ident ; $enum_name:ident ; $variant_name:ident , $($rest:tt)* ) => ({
-        if let &$enum_name::$variant_name = $e { return 0; }
-        derive_sizeof_variant_inner!($e ; $enum_name ; $($rest)*);
-    });
-    ($e:ident ; $enum_name:ident ; $variant_name:ident { $($args:tt)* } , $($rest:tt)* ) => ({
-        #[repr(C)]
-        struct tmp { $($args)* }
-        if let &$enum_name::$variant_name { .. } = $e { return std::mem::size_of::<tmp>(); }
-        derive_sizeof_variant_inner!($e ; $enum_name ; $($rest)*);
-    });
+macro_rules! derive_variant_data_inner {
+    ($e:ident ; $enum_name:ident ; $variant_name:ident , $($rest:tt)* ) => {
+        #[derive(Clone, Copy)]
+        #[cfg_attr(feature = "derive_debug", derive(Debug))]
+        pub struct $variant_name;
+        impl $variant_name {
+            #[inline(always)]
+            #[allow(dead_code)]
+            pub fn variant(&self) -> StateVariant { ::StateVariant::$variant_name }
+            #[inline(always)]
+            #[allow(dead_code)]
+            pub fn to_state(&self) -> State {
+                State::$variant_name
+            }
+        }
+        derive_variant_data_inner!($e ; $enum_name ; $($rest)*);
+    };
+    ($e:ident ; $enum_name:ident ; $variant_name:ident { $($name:ident : $ty:ty),* } , $($rest:tt)* ) => {
+        #[derive(Clone, Copy)]
+        #[cfg_attr(feature = "derive_debug", derive(Debug))]
+        pub struct $variant_name { $(pub $name: $ty),* }
+        impl $variant_name {
+            #[inline(always)]
+            #[allow(dead_code)]
+            pub fn variant(&self) -> StateVariant { ::StateVariant::$variant_name }
+            #[inline(always)]
+            #[allow(dead_code)]
+            pub fn to_state(&self) -> State {
+                State::$variant_name { $($name: self.$name),* }
+            }
+        }
+        derive_variant_data_inner!($e ; $enum_name ; $($rest)*);
+    };
     ($e:ident ; $enum_name:ident ;) => ()
 }
-macro_rules! derive_sizeof_variant {
-    { enum $enum_name:ident { $($args:tt)* } } => {
+macro_rules! derive_variant_data {
+    { pub enum $enum_name:ident { $($args:tt)* } } => {
         #[cfg_attr(feature = "derive_debug", derive(Debug))]
-        enum $enum_name { $($args)* }
-        #[inline(always)]
-        fn sizeof_variant(e: &$enum_name) -> usize {
-            derive_sizeof_variant_inner!(e ; $enum_name ; $($args)* );
-            unreachable!()
+        #[derive(Clone, Copy)]
+        pub enum $enum_name { $($args)* }
+        #[allow(non_snake_case)]
+        mod VariantData {
+            use super::{State, Mark, StateVariant, XAndCommon, DeclStuff, DeclArg, Ident};
+            derive_variant_data_inner!(e ; $enum_name ; $($args)* );
         }
     }
 }
 
-derive_sizeof_variant! {
-enum State {
-    Null { expecting_operator: bool }, // pops on , or closing delim, not skipping
+derive_variant_data! {
+pub enum State {
+    Dummy,
+    Null { expecting_operator: bool },
     GotIdent { ident: Mark },
     GotIdentColonColon { ident: Mark },
     GotFn,
     GotFnName { name: Mark, generic_start: Option<Mark> },
-    CallArgStart { call: CallStuff }, // skips
-    DeclArgStart { decl: DeclStuff, pending_default: bool }, // skips
-    DeclEnd { decl: DeclStuff, old_name: ast::Ident, new_full_name: ast::Ident, args_end: Mark },
+    CallArgStart,
+    DeclArgStart { pending_default: bool },
+    DeclEnd { decl: &'static DeclStuff, davs: &'static [XAndCommon<DeclArg>], old_name: Ident, new_full_name: Ident, args_end: Mark, decl_end: Option<Mark> },
     SeekingSemiOrOpenBrace,
-    DefinitelyType { angle_depth: usize, eager_exit: bool, start_of_type: bool }, // pops on closing >, skipping it
+    DefinitelyType { angle_depth: u32, eager_exit: bool, start_of_type: bool }, // pops on closing >, skipping it
     LambdaEnd,
     ExcessCloses,
+    Pop,
+}
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StateVariant {
     Dummy,
+    Null,
+    GotIdent,
+    GotIdentColonColon,
+    GotFn,
+    GotFnName,
+    CallStart, // name: Mark
+    CallArg, // Option<Ident>
+    CallArgStart,
+    DeclStart, // DeclStuff
+    DeclArg, // DeclArg
+    DeclArgStart,
+    DeclEnd,
+    SeekingSemiOrOpenBrace,
+    DefinitelyType,
+    LambdaEnd,
+    ExcessCloses,
+    // dummy
+    Pop,
 }
+
+
+struct Stack {
+    v: Vec<u64>,
+    top: *mut u64
 }
-struct StackEntry {
-    state: State,
-    delim_depth: usize,
-    in_func_parens: bool,
-}
-#[cfg_attr(feature = "derive_debug", derive(Debug))]
-struct CallStuff {
-    name: Mark,
-    args: Vec<Option<Ident>>,
-}
-#[cfg_attr(feature = "derive_debug", derive(Debug))]
-struct DeclStuff {
-    name: Mark,
-    args: Vec<DeclArg>,
-    generic_start: Option<Mark>,
-    args_start: Mark,
-    decl_end: Option<Mark>,
+impl Stack {
+    fn new() -> Self {
+        // allocate some huge buffer
+        let mut v: Vec<u64> = Vec::with_capacity(500000);
+        let top = unsafe { v.as_mut_ptr().offset(v.capacity() as isize) };
+        Stack { v: v, top: top }
+    }
+    fn top(&self) -> StackPtr { StackPtr(self.top) }
+    fn bottom(&mut self) -> StackPtr { StackPtr(self.v.as_mut_ptr()) }
+    #[allow(dead_code)]
+    fn len(&mut self, sp: StackPtr) -> usize {
+        ((sp.0 as usize) - (self.bottom().0 as usize)) / size_of::<u64>()
+    }
 }
 #[derive(Clone, Copy)]
+struct StackPtr(*mut u64);
+impl StackPtr {
+    #[inline(always)]
+    fn ptr(self) -> *mut u64 { self.0 }
+    #[inline(always)]
+    fn pop_ref<T: Copy>(&mut self) -> &'static mut T {
+        unsafe {
+            let count = (size_of::<T>() + 7) / 8;
+            if_println_spam! {
+                println!("popping {} u64s", count);
+            }
+            self.0 = self.0.offset(-(count as isize));
+            &mut *(self.0 as *mut T)
+        }
+    }
+    #[inline(always)]
+    fn last_ref<T: Copy>(self) -> &'static T {
+        unsafe {
+            let count = (size_of::<T>() + 7) / 8;
+            let p = self.0.offset(-(count as isize));
+            &*(p as *const T)
+        }
+    }
+    #[inline(always)]
+    fn last_ref_mut<T: Copy>(self) -> &'static mut T {
+        unsafe {
+            let count = (size_of::<T>() + 7) / 8;
+            let p = self.0.offset(-(count as isize));
+            &mut *(p as *mut T)
+        }
+    }
+    #[inline(always)]
+    fn push<T: Copy>(&mut self, top: StackPtr, t: T) {
+        unsafe {
+            if (top.0 as usize) - (self.0 as usize) < size_of::<T>() {
+                panic!("stack overflow");
+            }
+            let count = (size_of::<T>() + 7) / 8;
+            if_println_spam! {
+                println!("pushing {} u64s", count);
+            }
+            *(self.0 as *mut T) = t;
+            self.0 = self.0.offset(count as isize);
+        }
+    }
+}
+
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
-struct DeclArg {
+#[derive(Clone, Copy)]
+pub struct DeclStuff {
+    name: Mark,
+    generic_start: Option<Mark>,
+    args_start: Mark,
+}
+#[cfg_attr(feature = "derive_debug", derive(Debug))]
+#[derive(Clone, Copy)]
+pub struct DeclArg {
     name: Option<Ident>,
     ty_start: Option<Mark>,
     ty_end: Option<Mark>,
     is_default: bool,
 }
 
-fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &ast::Ident, new_full_name: &ast::Ident) {
+#[cfg_attr(feature = "derive_debug", derive(Debug))]
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct Common {
+    _align: [u64; 0],
+    delim_depth: u32,
+    in_func_parens: bool,
+    variant: u8,
+}
+
+impl Common {
+    #[inline(always)]
+    pub fn variant(&self) -> StateVariant {
+        unsafe { transmute(self.variant) }
+    }
+}
+
+#[cfg_attr(feature = "derive_debug", derive(Debug))]
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct XAndCommon<X: Copy> {
+    x: X,
+    c: Common,
+}
+
+impl<X: Copy> XAndCommon<X> {
+    #[inline(always)]
+    fn new(x: X, common: Common) -> Self {
+        XAndCommon { x: x, c: common }
+    }
+}
+
+fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &ast::Ident, new_full_name: &ast::Ident) {
     let none_ident = Ident::with_empty_ctxt(token::intern("None"));
     let allow_ident = Ident::with_empty_ctxt(token::intern("allow"));
     let dead_code_ident = Ident::with_empty_ctxt(token::intern("dead_code"));
@@ -447,7 +583,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: us
     tw.write(token::Ident(keywords::Fn.ident()));
     let partial_name = mutate_name(old_name, {
         let mut i = 0;
-        args.iter().filter_map(move |arg| {
+        args.iter().filter_map(move |&XAndCommon { x: ref arg, .. }| {
             if arg.is_default {
                 i += 1;
                 if i > num_include {
@@ -464,7 +600,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: us
     tw.write(token::OpenDelim(DelimToken::Paren));
     let mut i = 0;
     let mut arg_names: Vec<Ident> = Vec::with_capacity(args.len());
-    for arg in args {
+    for &XAndCommon { x: ref arg, .. } in args {
         if arg.is_default {
             i += 1;
             if i > num_include {
@@ -501,10 +637,10 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[DeclArg], num_include: us
 pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, EC>) {
     let default_name = token::intern("default");
     let mut state: State = State::Null { expecting_operator: false };
-    let mut delim_depth: usize = 0;
+    let mut delim_depth: u32 = 0;
     let mut in_func_parens: bool = false;
-    let mut stuff: Vec<u32> = Vec::new();
-    // XXX push TooMany
+    let mut stack: Stack = Stack::new();
+    let mut sp: StackPtr = stack.bottom();
     let xsp = &mut state as *mut State;
     let mut st: SpanToken<'a>;
     macro_rules! st_or_return {
@@ -525,34 +661,36 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
             continue;
         }}
     }
-    macro_rules! push { ($state:expr) => { {
-        let _state = $state;
-        stack.push(StackEntry { state: _state, delim_depth: delim_depth, in_func_parens: in_func_parens });
+    macro_rules! pushx_manual { ($variant:expr, $vdata:expr) => { {
+        let _variant: StateVariant = $variant;
+        if_println_spam! {
+            println!("pushing variant {:?} dd={} ifp={}", _variant, delim_depth, in_func_parens);
+        }
+        sp.push(stack.top(), XAndCommon::new($vdata, Common { _align: [], delim_depth: delim_depth, in_func_parens: in_func_parens, variant: _variant as u8 }));
         delim_depth = 0;
         in_func_parens = false;
         let _ = in_func_parens; // avoid warning
     } } }
-    macro_rules! pop { ($($possible_variants:ident),*) => { {
-        unsafe {
-            let variant: *State = pop_count(1) as *State;
-            let size = sizeof_variant(&*variant) / 4;
-            pop_count(size);
-            match *variant {
-                $(
-
-                )*
-            }
+    macro_rules! pushx { ($vdata:expr) => {
+        let _vdata = $vdata;
+        pushx_manual!(_vdata.variant(), _vdata)
+    } }
+    macro_rules! popx { ($vdata_ty:ty) => { {
+        let xac = sp.pop_ref::<XAndCommon<$vdata_ty>>();
+        debug_assert_eq!(xac.c.variant, xac.c.variant() as u8);
+        if_println_spam! {
+            println!("popping {:?}", xac);
         }
-        let entry = stack.pop().unwrap();
-        delim_depth = entry.delim_depth;
-        in_func_parens = entry.in_func_parens;
-        entry.state
+        delim_depth = xac.c.delim_depth;
+        in_func_parens = xac.c.in_func_parens;
+        xac.x.to_state()
     } } }
+    pushx!(VariantData::ExcessCloses);
     st = st_or_return!();
     loop {
         if_println_spam! {
-            println!("stack={} state={:?}", stack.len(), state);
-            println!("parserdepth={} delim_depth={} tok={:?}", tr.stack.len(), delim_depth, st.token);
+            println!("stack={} state={:?}", stack.len(sp), state);
+            println!("parserdepth={} delim_depth={} ifp={} tok={:?}", tr.stack.len(), delim_depth, in_func_parens, st.token);
             ctx.cx.span_warn(*st.span, "hi");
         }
         match replace(&mut state, State::Dummy) {
@@ -572,7 +710,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             continue_next!(State::GotFn);
                         }
                         if name == keywords::As.name() && in_func_parens && delim_depth == 0 {
-                            push!(State::Null { expecting_operator: true });
+                            pushx!(VariantData::Null { expecting_operator: true });
                             continue_next!(State::DefinitelyType { angle_depth: 0, eager_exit: false, start_of_type: true });
                         }
                         continue_next!(State::Null { expecting_operator: false });
@@ -583,7 +721,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     },
                     &token::CloseDelim(_) => {
                         if delim_depth == 0 {
-                            continue_same!(pop!());
+                            continue_same!(State::Pop);
                         } else {
                             delim_depth -= 1;
                         }
@@ -591,19 +729,19 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     },
                     &token::Comma => {
                         if delim_depth == 0 {
-                            continue_same!(pop!());
+                            continue_same!(State::Pop);
                         }
                         expecting_operator = false;
                     },
                     &token::Colon => {
                         if delim_depth == 0 && in_func_parens {
-                            match stack.last_mut() {
-                                Some(&mut StackEntry { state: State::DeclArgStart { ref mut decl, .. }, .. }) => {
-                                    decl.args.last_mut().unwrap().ty_start = Some(tr.mark_last());
-                                },
-                                _ => ()
+                            let mut test = sp;
+                            if test.pop_ref::<Common>().variant() == StateVariant::DeclArgStart {
+                                test.pop_ref::<VariantData::DeclArgStart>();
+                                let data = test.pop_ref::<XAndCommon<DeclArg>>();
+                                data.x.ty_start = Some(tr.mark_last());
                             }
-                            push!(State::Null { expecting_operator: true });
+                            pushx!(VariantData::Null { expecting_operator: true });
                             continue_next!(State::DefinitelyType { angle_depth: 0, eager_exit: false, start_of_type: true });
                         }
                     },
@@ -614,20 +752,20 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             expecting_operator = false;
                         } else {
                             if delim_depth == 0 && in_func_parens {
-                                push!(State::Null { expecting_operator: true });
+                                pushx!(VariantData::Null { expecting_operator: true });
                                 continue_next!(State::DefinitelyType { angle_depth: 1, eager_exit: true, start_of_type: true });
                             }
                         }
                     },
                     &token::BinOp(token::Or) if !expecting_operator => {
                         if delim_depth == 0 {
-                            if let Some(&StackEntry { state: State::LambdaEnd, .. }) = stack.last() {
+                            if sp.last_ref::<Common>().variant() == StateVariant::LambdaEnd {
                                 // end of lambda
-                                continue_next!(pop!());
+                                continue_next!(popx!(VariantData::LambdaEnd));
                             }
                         }
                         // start of lambda
-                        push!(State::LambdaEnd);
+                        pushx!(VariantData::LambdaEnd);
                         continue_next!(State::Null { expecting_operator: false });
                     },
                     &token::Eq | &token::Le | &token::EqEq | &token::Ne | &token::Ge |
@@ -664,12 +802,9 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         continue_next!(State::GotIdentColonColon { ident: ident });
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
-                        push!(State::Null { expecting_operator: true });
-                        in_func_parens = true;
-                        continue_next!(State::CallArgStart { call: CallStuff {
-                            name: ident,
-                            args: Vec::new(),
-                        } });
+                        delim_depth += 1;
+                        pushx_manual!(StateVariant::CallStart, ident);
+                        continue_next!(State::CallArgStart);
                     },
                     _ => {
                         continue_same!(State::Null { expecting_operator: true });
@@ -679,7 +814,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
             State::GotIdentColonColon { ident } => {
                 match st.token {
                     &token::Lt => {
-                        push!(State::GotIdent { ident: ident });
+                        pushx!(VariantData::GotIdent { ident: ident });
                         continue_next!(State::DefinitelyType { angle_depth: 1, eager_exit: true, start_of_type: true });
                     },
                     _ => continue_same!(State::Null { expecting_operator: false }),
@@ -701,72 +836,94 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
             State::GotFnName { name, generic_start } => {
                 match st.token {
                     &token::Lt => {
-                        let state = State::GotFnName { name: name, generic_start: Some(tr.mark_last()) };
-                        push!(state);
+                        pushx!(VariantData::GotFnName { name: name, generic_start: Some(tr.mark_last()) });
                         continue_next!(State::DefinitelyType { angle_depth: 1, eager_exit: true, start_of_type: true });
                     },
                     &token::OpenDelim(DelimToken::Paren) => {
-                        push!(State::Null { expecting_operator: false });
-                        in_func_parens = true;
-                        continue_next!(State::DeclArgStart {
-                            decl: DeclStuff {
-                                name: name,
-                                args: Vec::new(),
-                                generic_start: generic_start,
-                                args_start: tr.mark_last(),
-                                decl_end: None,
-                            },
-                            pending_default: false,
+                        delim_depth += 1;
+                        pushx_manual!(StateVariant::DeclStart, DeclStuff {
+                            name: name,
+                            generic_start: generic_start,
+                            args_start: tr.mark_last(),
                         });
+                        continue_next!(State::DeclArgStart { pending_default: false });
                     },
                     // this definitely shouldn't happen
                     _ => continue_same!(State::Null { expecting_operator: true }),
                 }
             },
-            State::CallArgStart { mut call } => {
+            State::CallArgStart => {
                 match st.token {
                     &token::Ident(ref ident) => {
                         let mark = tr.mark_last();
                         let st2 = st_or_return!();
                         if let &token::Colon = st2.token {
-                            call.args.push(Some(*ident));
                             tr.delete_from_mark(mark, 2);
-                            push!(State::CallArgStart { call: call });
+                            pushx_manual!(StateVariant::CallArg, Some(*ident));
+                            pushx!(VariantData::CallArgStart);
+                            in_func_parens = true;
                             continue_next!(State::Null { expecting_operator: false });
                         } else {
-                            call.args.push(None);
-                            push!(State::CallArgStart { call: call });
+                            pushx_manual!(StateVariant::CallArg, None::<Ident>);
+                            pushx!(VariantData::CallArgStart);
+                            in_func_parens = true;
                             st = st2;
                             continue_same!(State::GotIdent { ident: tr.mark_last() });
                         }
                     },
                     &token::CloseDelim(_) => {
-                        //println!("call closedelim: {:?}", call.args);
-                        if call.args.iter().any(|arg| arg.is_some()) {
-                            let name = tr.mutate_mark(call.name);
-                            match *name {
-                                TokenTree::Token(_, token::Ident(ref mut ident)) => {
-                                    let new_name = mutate_name(ident, call.args.iter().map(|arg| arg.as_ref()));
-                                    *ident = new_name;
+                        // end of call
+                        let mut any = false;
+                        let orig_name: Mark;
+                        let mut first_arg = sp;
+                        let mut num_args = 0;
+                        loop {
+                            let common = sp.pop_ref::<Common>();
+                            delim_depth = common.delim_depth;
+                            match common.variant() {
+                                StateVariant::CallStart => {
+                                    orig_name = *sp.pop_ref::<Mark>();
+                                    break;
                                 },
-                                _ => unreachable!(),
+                                StateVariant::CallArg => {
+                                    let ident = *sp.pop_ref::<Option<Ident>>();
+                                    if ident.is_some() { any = true; }
+                                    num_args += 1;
+                                    first_arg = sp;
+                                },
+                                _ => {
+                                    unreachable!();
+                                },
                             }
                         }
-                        continue_next!(pop!());
+                        if any {
+                            let name = tr.mutate_mark(orig_name);
+                            if let TokenTree::Token(_, token::Ident(ref mut ident)) = *name {
+                                let cavs: &'static [XAndCommon<Option<Ident>>] = unsafe { slice::from_raw_parts(transmute(first_arg.ptr()), num_args) };
+                                let arg_names = cavs.iter().map(|cav| cav.x.as_ref());
+                                let new_name = mutate_name(ident, arg_names);
+                                *ident = new_name;
+                            } else { unreachable!() }
+                        }
+                        in_func_parens = true;
+                        continue_same!(State::Null { expecting_operator: true });
                     },
                     &token::Comma => {
-                        continue_next!(State::CallArgStart { call: call });
+                        continue_next!(State::CallArgStart);
                     },
                     _ => {
-                        call.args.push(None);
-                        push!(State::CallArgStart { call: call });
+                        pushx_manual!(StateVariant::CallArg, None::<Ident>);
+                        pushx!(VariantData::CallArgStart);
+                        in_func_parens = true;
                         continue_same!(State::Null { expecting_operator: false });
                     }
                 }
             },
-            State::DeclArgStart { mut decl, pending_default } => {
-                if let Some(prev_arg) = decl.args.last_mut() {
-                    prev_arg.ty_end = Some(tr.mark_last());
+            State::DeclArgStart { pending_default } => {
+                in_func_parens = true;
+                if sp.last_ref::<Common>().variant() == StateVariant::DeclArg {
+                    let prev_arg = sp.last_ref_mut::<XAndCommon<DeclArg>>();
+                    prev_arg.x.ty_end = Some(tr.mark_last());
                 }
                 match st.token {
                     &token::Ident(ident) if ident.name == keywords::Ref.name() ||
@@ -780,10 +937,12 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                                 tr.delete_from_mark(to_delete, 1);
                                 match st.token {
                                     &token::Ident(ident1) => {
-                                        decl.args.push(DeclArg { name: Some(ident1), ty_start: None, ty_end: None, is_default: pending_default });
+                                        pushx_manual!(StateVariant::DeclArg, DeclArg { name: Some(ident1), ty_start: None, ty_end: None, is_default: pending_default });
+                                        pushx!(VariantData::DeclArgStart { pending_default: false });
                                     },
                                     &Token::Underscore => {
-                                        decl.args.push(DeclArg { name: Some(ident2), ty_start: None, ty_end: None, is_default: pending_default });
+                                        pushx_manual!(StateVariant::DeclArg, DeclArg { name: Some(ident2), ty_start: None, ty_end: None, is_default: pending_default });
+                                        pushx!(VariantData::DeclArgStart { pending_default: false });
                                         let st3 = st_or_return!();
                                         if let &Token::Colon = st3.token {} else {
                                             ctx.cx.span_err(*st3.span, "_ should be followed by an ident pattern");
@@ -795,36 +954,63 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             },
                             _ => {
                                 // this could just be a type
-                                decl.args.push(DeclArg { name: None, ty_start: Some(tr.mark_last()), ty_end: None, is_default: pending_default });
+                                pushx_manual!(StateVariant::DeclArg, DeclArg { name: None, ty_start: Some(tr.mark_last()), ty_end: None, is_default: pending_default });
+                                pushx!(VariantData::DeclArgStart { pending_default: false });
                                 st = st2;
                             },
                         }
-                        push!(State::DeclArgStart { decl: decl, pending_default: pending_default });
+                        in_func_parens = true;
                         continue_same!(State::Null { expecting_operator: false });
                     },
                     &token::CloseDelim(_) => {
-                        //println!("decl closedelim: {:?}", decl);
-                        if decl.args.iter().any(|arg| arg.name.is_some() || arg.is_default) {
-                            let args_end = tr.mark_next();
+                        let args_end_mark = tr.mark_next();
+                        let save = sp;
+                        let mut first_arg = sp;
+                        let mut any = false;
+                        let mut any_default = false;
+                        let mut num_args = 0;
+                        let decl: &'static DeclStuff;
+                        loop {
+                            let common = sp.pop_ref::<Common>();
+                            delim_depth = common.delim_depth;
+                            in_func_parens = common.in_func_parens;
+                            match common.variant() {
+                                StateVariant::DeclStart => {
+                                    decl = sp.pop_ref::<DeclStuff>();
+                                    break;
+                                },
+                                StateVariant::DeclArg => {
+                                    let arg = sp.pop_ref::<DeclArg>();
+                                    if arg.name.is_some() || arg.is_default { any = true; }
+                                    if arg.is_default { any_default = true; }
+                                    num_args += 1;
+                                    first_arg = sp;
+                                },
+                                _ => unreachable!(),
+                            }
+                        }
+                        if any {
                             let new_full_name: ast::Ident;
                             let old_name: ast::Ident;
+                            let davs: &'static [XAndCommon<DeclArg>] = unsafe { slice::from_raw_parts(transmute(first_arg.ptr()), num_args) };
                             {
                                 let name = tr.mutate_mark(decl.name);
                                 if let TokenTree::Token(_, token::Ident(ref mut ident)) = *name {
                                     old_name = *ident;
-                                    new_full_name = mutate_name(ident, decl.args.iter().map(|arg| arg.name.as_ref()));
+                                    new_full_name = mutate_name(ident, davs.iter().map(|dav| dav.x.name.as_ref()));
                                     *ident = new_full_name;
                                 } else {
-                                    panic!("?? {:?}", name);
+                                    unreachable!();
                                 }
                             }
                             // generate stubs for default arguments
-                            if decl.args.iter().any(|arg| arg.is_default) {
-                                push!(State::DeclEnd { decl: decl, old_name: old_name, new_full_name: new_full_name, args_end: args_end });
+                            if any_default {
+                                sp = save;
+                                pushx!(VariantData::DeclEnd { decl: decl, davs: davs, old_name: old_name, new_full_name: new_full_name, args_end: args_end_mark, decl_end: None });
                                 continue_next!(State::SeekingSemiOrOpenBrace);
                             }
                         }
-                        continue_next!(pop!());
+                        continue_next!(State::Null { expecting_operator: true });
                     },
                     &token::Pound => { // #
                         let attr_start = tr.mark_last();
@@ -840,36 +1026,39 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                                         if pending_default {
                                             ctx.cx.span_err(*st2.span, "duplicate #[default]");
                                         }
-                                        continue_next!(State::DeclArgStart { decl: decl, pending_default: true });
+                                        continue_next!(State::DeclArgStart { pending_default: true });
 
                                     } else { st = st4; }
                                 } else { st = st3; }
                             } else { st = st3; }
                         } else { st = st2; }
                     },
-                    &token::Comma => continue_next!(State::DeclArgStart { decl: decl, pending_default: false }),
+                    &token::Comma => continue_next!(State::DeclArgStart { pending_default: false }),
                     _ => (),
                 }
-                decl.args.push(DeclArg { name: None, ty_start: Some(tr.mark_last()), ty_end: None, is_default: pending_default });
-                push!(State::DeclArgStart { decl: decl, pending_default: false });
+                pushx_manual!(StateVariant::DeclArg, DeclArg { name: None, ty_start: Some(tr.mark_last()), ty_end: None, is_default: pending_default });
+                pushx!(VariantData::DeclArgStart { pending_default: false });
+                in_func_parens = true;
                 continue_same!(State::Null { expecting_operator: false });
             },
-            State::DeclEnd { decl, old_name, new_full_name, args_end } => {
+            State::DeclEnd { decl, davs, old_name, new_full_name, args_end, decl_end } => {
                 // only get here if we need defaults
                 match st.token {
                     &token::Semi | &Token::CloseDelim(DelimToken::Brace) => {
-                        let decl_end: Mark = decl.decl_end.unwrap_or_else(|| tr.mark_last());
-                        let default_count = decl.args.iter().filter(|arg| arg.is_default).count();
+                        let decl_end: Mark = decl_end.unwrap_or_else(|| tr.mark_last());
+                        let default_count = davs.iter().filter(|dav| dav.x.is_default).count();
                         for num_include in 0..default_count {
-                            gen_default_stub(tr, &decl.args, num_include, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name);
+                            gen_default_stub(tr, &davs, num_include, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name);
                         }
-                        continue_next!(pop!());
-                    },
-                    &Token::OpenDelim(DelimToken::Brace) => {
-                        push!(State::DeclEnd { decl: decl, old_name: old_name, new_full_name: new_full_name, args_end: args_end });
                         continue_next!(State::Null { expecting_operator: false });
                     },
-                    _ => panic!("unexpected token at decl end"),
+                    &Token::OpenDelim(DelimToken::Brace) => {
+                        // repush?
+                        let decl_end = tr.mark_last();
+                        pushx!(VariantData::DeclEnd { decl: decl, davs: davs, old_name: old_name, new_full_name: new_full_name, args_end: args_end, decl_end: Some(decl_end) });
+                        continue_next!(State::Null { expecting_operator: false });
+                    },
+                    _ => panic!("unexpected token at DeclEnd XXX"),
                 }
             }
             State::DefinitelyType { mut angle_depth, eager_exit, start_of_type } => {
@@ -885,7 +1074,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             if delim_depth != 0 {
                                 ctx.cx.span_err(*st.span, "unexpected '>' misnested w.r.t. ()[]{}. possible parser bug");
                             }
-                            continue_next!(pop!());
+                            continue_next!(State::Pop);
                         }
                     },
                     &token::BinOp(token::Shr) if angle_depth > 0 => {
@@ -896,7 +1085,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                                 *ptr = token::Gt;
                                 st.token = &*ptr;
                             }
-                            continue_same!(pop!());
+                            continue_same!(State::Pop);
                         } else {
                             angle_depth -= 2;
                         }
@@ -904,7 +1093,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             if delim_depth != 0 {
                                 ctx.cx.span_err(*st.span, "unexpected '>' misnested w.r.t. ()[]{}. possible parser bug");
                             }
-                            continue_next!(pop!());
+                            continue_next!(State::Pop);
                         }
                     },
                     &token::OpenDelim(DelimToken::Bracket) | &token::OpenDelim(DelimToken::Paren) => {
@@ -919,7 +1108,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                                 // similar
                                 ctx.cx.span_err(*st.span, "unexpected close delimiter in type. possible parser bug");
                             }
-                            continue_same!(pop!());
+                            continue_same!(State::Pop);
                         }
                     },
                     // tokens allowed in a type
@@ -944,7 +1133,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         if let &token::OpenDelim(DelimToken::Bracket) = st2.token {
                             // attribute
                             delim_depth += 1;
-                            push!(State::DefinitelyType { angle_depth: angle_depth, eager_exit: eager_exit, start_of_type: true });
+                            pushx!(VariantData::DefinitelyType { angle_depth: angle_depth, eager_exit: eager_exit, start_of_type: true });
                             continue_next!(State::Null { expecting_operator: false });
                         } else {
                             ctx.cx.span_err(*st.span, "this shouldn't be in a type. possible parser bug");
@@ -955,7 +1144,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     // tokens allowed inside other things
                     &token::Semi if delim_depth != 0 => {
                         // inside an array decl, puts us into expression context
-                        push!(State::DefinitelyType { angle_depth: angle_depth, eager_exit: eager_exit, start_of_type: false });
+                        pushx!(VariantData::DefinitelyType { angle_depth: angle_depth, eager_exit: eager_exit, start_of_type: false });
                         continue_next!(State::Null { expecting_operator: false });
                     },
                     &token::Comma | &token::Colon | &token::Eq | &token::BinOp(token::Plus) if
@@ -967,7 +1156,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                     // anything else ends the type
                     _ => {
                         if angle_depth == 0 && delim_depth == 0 {
-                            continue_same!(pop!());
+                            continue_same!(State::Pop);
                         } else {
                             match st.token {
                                 &token::BinOp(token::Star) | &token::BinOp(token::Plus) => (),
@@ -981,16 +1170,34 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                 }
                 continue_next!(State::DefinitelyType { angle_depth: angle_depth, eager_exit: eager_exit, start_of_type: new_start_of_type });
             },
+            State::Pop => {
+                let variant = sp.last_ref::<Common>().variant();
+                match variant {
+                    StateVariant::GotIdent => continue_same!(popx!(VariantData::GotIdent)),
+                    StateVariant::GotFnName => continue_same!(popx!(VariantData::GotFnName)),
+                    StateVariant::Null => continue_same!(popx!(VariantData::Null)),
+                    StateVariant::LambdaEnd => continue_same!(popx!(VariantData::LambdaEnd)),
+                    StateVariant::CallArgStart => continue_same!(popx!(VariantData::CallArgStart)),
+                    StateVariant::DeclArgStart => continue_same!(popx!(VariantData::DeclArgStart)),
+                    StateVariant::DeclEnd => continue_same!(popx!(VariantData::DeclEnd)),
+                    StateVariant::DefinitelyType => continue_same!(popx!(VariantData::DefinitelyType)),
+                    StateVariant::SeekingSemiOrOpenBrace => continue_same!(popx!(VariantData::SeekingSemiOrOpenBrace)),
+                    StateVariant::ExcessCloses => continue_same!(popx!(VariantData::ExcessCloses)),
+                    _ => unreachable!("variant was {:?}?", variant),
+
+                }
+
+            },
             State::SeekingSemiOrOpenBrace => {
                 match st.token {
                     &token::Semi | &token::OpenDelim(DelimToken::Brace) => {
                         if delim_depth == 0 {
-                            continue_same!(pop!());
+                            continue_same!(popx!(VariantData::DeclEnd));
                         }
                     },
                     &token::OpenDelim(_) => {
                         delim_depth += 1;
-                        push!(State::SeekingSemiOrOpenBrace);
+                        pushx!(VariantData::SeekingSemiOrOpenBrace);
                         continue_next!(State::Null { expecting_operator: false });
                     },
                     &token::CloseDelim(_) => {
@@ -998,7 +1205,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             delim_depth -= 1;
                         } else {
                             ctx.cx.span_err(*st.span, "unexpected close delim. possible parser bug");
-                            continue_next!(pop!());
+                            continue_same!(popx!(VariantData::DeclEnd));
                         }
                     },
                     _ => ()
@@ -1009,7 +1216,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                 // these are used as tokens
                 match st.token {
                     &token::Comma => {
-                        push!(State::LambdaEnd);
+                        pushx!(VariantData::LambdaEnd);
                         continue_next!(State::Null { expecting_operator: false });
                     },
                     _ => {
@@ -1019,7 +1226,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
             },
             State::ExcessCloses => {
                 ctx.cx.span_err(*st.span, "excess close delimeters. possible parser bug");
-                push!(State::ExcessCloses);
+                pushx!(VariantData::ExcessCloses);
                 continue_next!(State::Null { expecting_operator: false });
             },
             State::Dummy => unreachable!(),
