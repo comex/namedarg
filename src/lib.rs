@@ -18,7 +18,8 @@ use syntax_pos::Span;
 use syntax::ast;
 pub use syntax::ast::Ident;
 use syntax::util::small_vector::SmallVector;
-//use syntax::print::pprust;
+#[allow(unused_imports)]
+use syntax::print::pprust;
 use rustc_plugin::registry::Registry;
 use syntax::parse::token;
 use syntax::parse::token::{Token, DelimToken};
@@ -53,25 +54,38 @@ fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
     MacEager::items(items)
 }
 
-fn mutate_name<'a, I>(fn_name_ident: &ast::Ident, arg_names: I) -> ast::Ident
+fn mutate_name<'a, I>(fn_name_ident: &ast::Ident, arg_names: I, ctx: &Context) -> ast::Ident
     where I: Iterator<Item=Option<&'a ast::Ident>> {
     let mut name: String = (*fn_name_ident.name.as_str()).to_owned();
-    name.push('{');
-    //name.push_str("_$lbl");
+    if ctx.use_valid_idents {
+        name.push_str("__lbl");
+    } else {
+        name.push('{');
+    }
     let mut any = false;
     for arg_name in arg_names {
-        //name.push('_');
-        if let Some(arg_name) = arg_name {
-            name.push_str(&*arg_name.name.as_str());
+        if ctx.use_valid_idents {
+            if let Some(arg_name) = arg_name {
+                name.push_str("__");
+                name.push_str(&*arg_name.name.as_str());
+            } else {
+                name.push_str("_X");
+            }
+        } else {
+            if let Some(arg_name) = arg_name {
+                name.push_str(&*arg_name.name.as_str());
+            }
+            name.push(':');
         }
-        name.push(':');
         any = true;
     }
     if !any {
         // if all arguments defaulted, use an untransformed ident
         return *fn_name_ident;
     }
-    name.push('}');
+    if !ctx.use_valid_idents {
+        name.push('}');
+    }
     ast::Ident { name: token::intern(&name), ctxt: fn_name_ident.ctxt }
 }
 
@@ -107,13 +121,20 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
     fn copy_from_mark_range(&mut self, start: Mark, end: Mark, gm: GetMode) {
         //println!("CFMR: enter={:?} start={:?} end={:?}", enter, start, end);
         //println!("CFMR: have {:?}",self.output);
-        let to_add: Vec<TokenTree> = self.tr.get(start, end, gm).to_owned();
+        let to_add: Vec<TokenTree> = self.replacing_output(|tr| tr.get(start, end, gm).to_owned());
         let token_storage = UnsafeCell::new(token::DotDot);
         let mut tr2 = TTReader::new(&to_add, &token_storage);
         while let Some(st) = tr2.next() {
             self.write(st.token.clone());
         }
         //println!("CFMR out");
+    }
+    fn replacing_output<O, F: FnOnce(&mut TTReader<'a>) -> O>(&mut self, f: F) -> O {
+        let ptr = if self.output_stack.is_empty() { &mut self.output } else { self.output_stack.first_mut().unwrap() };
+        self.tr.output = Some(replace(ptr, Vec::new()));
+        let o = f(self.tr);
+        *ptr = replace(&mut self.tr.output, None).unwrap();
+        o
     }
     fn finish(mut self) {
         assert!(self.output_stack.is_empty());
@@ -254,6 +275,7 @@ impl<'a> TTReader<'a> {
         }
     }
     fn mark_last(&self) -> Mark {
+        self.check_offset();
         if self.cur_offset == 0 {
             let &(pwhole, pcur, ref poutput) = self.stack.last().unwrap();
             let pos = if let &Some(ref poutput) = poutput {
@@ -273,11 +295,18 @@ impl<'a> TTReader<'a> {
         }
     }
     fn mark_next(&self) -> Mark {
+        self.check_offset();
         Mark {
             cur_offset: self.cur_offset,
             cur_stack_depth: make_cur_stack_depth(self.stack.len()),
         }
     }
+    #[cfg(debug_assertions)]
+    fn check_offset(&self) {
+        assert_eq!(self.cur_offset, if let Some(ref o) = self.output { o.len() } else { self.offset_in_whole() });
+    }
+    #[cfg(not(debug_assertions))]
+    fn check_offset(&self) {}
     fn offset_in_whole(&self) -> usize {
         self.whole.len() - self.cur.len()
     }
@@ -371,8 +400,9 @@ impl ExtCtxtish for errors::Handler {
     fn span_warn(&self, sp: Span, msg: &str) { errors::Handler::span_warn(self, sp, msg) }
 }
 
-pub struct Context<'x, EC: ExtCtxtish + 'x> {
-    pub cx: &'x EC
+pub struct Context<'x> {
+    pub cx: &'x ExtCtxtish,
+    pub use_valid_idents: bool,
 }
 
 
@@ -440,7 +470,7 @@ pub enum State {
     LambdaEnd,
     TraitDeclOpen { trait_start: Mark, trait_end: Option<Mark> },
     ImplDeclAfterGeneric,
-    ImplDeclAfterTrait { trait_start: Mark, got_for: bool },
+    ImplDeclAfterTrait { trait_start: Mark, trait_end: Option<Mark> },
     InTraitOrImpl { trait_start_end: Option<(Mark, Mark)>, prev: Option<&'static VariantData::InTraitOrImpl> },
     ExcessCloses,
     Pop,
@@ -591,7 +621,7 @@ impl<X: Copy> XAndCommon<X> {
     }
 }
 
-fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &ast::Ident, new_full_name: &ast::Ident, cur_in_trait_or_impl: Option<&'static VariantData::InTraitOrImpl>) {
+fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &ast::Ident, new_full_name: &ast::Ident, cur_in_trait_or_impl: Option<&'static VariantData::InTraitOrImpl>, ctx: &Context) {
     let none_ident = Ident::with_empty_ctxt(token::intern("None"));
     let allow_ident = Ident::with_empty_ctxt(token::intern("allow"));
     let dead_code_ident = Ident::with_empty_ctxt(token::intern("dead_code"));
@@ -617,7 +647,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
             }
             Some(arg.name.as_ref())
         })
-    });
+    }, ctx);
     tw.write(token::Ident(partial_name));
     if let Some(generic_start) = generic_start {
         tw.copy_from_mark_range(generic_start, args_start, GetMode::SameDepth);
@@ -642,8 +672,8 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
             // huh?
             tw.write(token::Colon);
             tw.write(token::Underscore);
-            tw.write(token::Comma);
         }
+        tw.write(token::Comma);
     }
     tw.write(token::CloseDelim(DelimToken::Paren));
     tw.copy_from_mark_range(args_end, decl_end, GetMode::SameDepth);
@@ -656,13 +686,12 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
             tw.write(token::Lt);
             tw.write(token::Ident(keywords::SelfType.ident()));
             tw.write(token::Ident(keywords::As.ident()));
-            println!("{:?} {:?}", start, end);
             tw.copy_from_mark_range(start, end, GetMode::OuterDepth);
             tw.write(token::Gt);
-            tw.write(token::ModSep);
         } else {
             tw.write(token::Ident(keywords::SelfType.ident()));
         }
+        tw.write(token::ModSep);
     }
 
     tw.write(token::Ident(*new_full_name));
@@ -676,7 +705,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
     tw.finish();
 }
 
-pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x, EC>) {
+pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
     let default_name = token::intern("default");
     let mut state: State = State::Null { expecting_operator: false, after_semi_or_brace: true };
     let mut delim_depth: u32 = 0;
@@ -764,7 +793,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                                 pushx!(VariantData::ImplDeclAfterGeneric);
                                 continue_next!(State::DefinitelyType { angle_depth: 1, eager_exit: true, start_of_type: true });
                             } else {
-                                pushx!(VariantData::ImplDeclAfterTrait { trait_start: tr.mark_last(), got_for: false });
+                                pushx!(VariantData::ImplDeclAfterTrait { trait_start: tr.mark_last(), trait_end: None });
                                 continue_same!(State::DefinitelyType { angle_depth: 0, eager_exit: false, start_of_type: true });
                             }
                         }
@@ -965,7 +994,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                             if let TokenTree::Token(_, token::Ident(ref mut ident)) = *name {
                                 let cavs: &'static [XAndCommon<Option<Ident>>] = unsafe { slice::from_raw_parts(transmute(first_arg.ptr()), num_args) };
                                 let arg_names = cavs.iter().map(|cav| cav.x.as_ref());
-                                let new_name = mutate_name(ident, arg_names);
+                                let new_name = mutate_name(ident, arg_names, ctx);
                                 *ident = new_name;
                             } else { unreachable!() }
                         }
@@ -987,7 +1016,9 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                 in_func_parens = true;
                 if sp.last_ref::<Common>().variant() == StateVariant::DeclArg {
                     let prev_arg = sp.last_ref_mut::<XAndCommon<DeclArg>>();
-                    prev_arg.x.ty_end = Some(tr.mark_last());
+                    if prev_arg.x.ty_end.is_none() {
+                        prev_arg.x.ty_end = Some(tr.mark_last());
+                    }
                 }
                 match st.token {
                     &token::Ident(ident) if ident.name == keywords::Ref.name() ||
@@ -1062,7 +1093,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                                 let name = tr.mutate_mark(decl.name);
                                 if let TokenTree::Token(_, token::Ident(ref mut ident)) = *name {
                                     old_name = *ident;
-                                    new_full_name = mutate_name(ident, davs.iter().map(|dav| dav.x.name.as_ref()));
+                                    new_full_name = mutate_name(ident, davs.iter().map(|dav| dav.x.name.as_ref()), ctx);
                                     *ident = new_full_name;
                                 } else {
                                     unreachable!();
@@ -1113,7 +1144,7 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
                         let decl_end: Mark = decl_end.unwrap_or_else(|| tr.mark_last());
                         let default_count = davs.iter().filter(|dav| dav.x.is_default).count();
                         for num_include in 0..default_count {
-                            gen_default_stub(tr, &davs, num_include, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name, cur_in_trait_or_impl);
+                            gen_default_stub(tr, &davs, num_include, decl.generic_start, decl.args_start, args_end, decl_end, &old_name, &new_full_name, cur_in_trait_or_impl, ctx);
                         }
                         sp = first_arg;
                         {
@@ -1322,20 +1353,19 @@ pub fn do_transform<'x, 'a: 'x, EC: ExtCtxtish + 'x>(tr: &mut TTReader<'a>, ctx:
 
             },
             State::ImplDeclAfterGeneric => {
-                pushx!(VariantData::ImplDeclAfterTrait { trait_start: tr.mark_last(), got_for: false });
+                pushx!(VariantData::ImplDeclAfterTrait { trait_start: tr.mark_last(), trait_end: None });
                 continue_same!(State::DefinitelyType { angle_depth: 0, eager_exit: false, start_of_type: true });
             },
-            State::ImplDeclAfterTrait { trait_start, got_for } => {
+            State::ImplDeclAfterTrait { trait_start, trait_end } => {
                 match st.token {
                     &token::Ident(ident) if ident.name == keywords::For.name() => {
-                        pushx!(VariantData::ImplDeclAfterTrait { trait_start: tr.mark_next(), got_for: true });
+                        pushx!(VariantData::ImplDeclAfterTrait { trait_start: trait_start, trait_end: Some(tr.mark_last()) });
                         continue_next!(State::SeekingSemiOrOpenBrace);
                     },
                     &token::OpenDelim(DelimToken::Brace) => {
-                        let trait_start_end = if got_for {
-                            Some((trait_start, tr.mark_last()))
+                        let trait_start_end = if let Some(trait_end) = trait_end {
+                            Some((trait_start, trait_end))
                         } else { None };
-                        println!("! in trait or impl");
                         let new = pushx!(VariantData::InTraitOrImpl { trait_start_end: trait_start_end, prev: cur_in_trait_or_impl });
                         cur_in_trait_or_impl = Some(&new.x);
                         continue_next!(State::Null { expecting_operator: false, after_semi_or_brace: true });
@@ -1375,7 +1405,7 @@ fn expand_namedarg<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree]
     let token_storage = UnsafeCell::new(token::DotDot);
     let mut tr = TTReader::new(args, &token_storage);
     {
-        let mut ctx = Context { cx: cx };
+        let mut ctx = Context { cx: cx, use_valid_idents: false };
         do_transform(&mut tr, &mut ctx);
     }
     let output = tr.output_as_slice();

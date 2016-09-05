@@ -26,10 +26,13 @@ fn main() {
     let tts: Vec<TokenTree> = filemap_to_tts(&ps, ps.codemap().new_filemap(filename.clone(), None, source));
     let time_1 = Instant::now();
 
+    let cx = &ps.span_diagnostic;
     let token_storage = UnsafeCell::new(token::DotDot);
     let mut tr = TTReader::new(&tts, &token_storage);
-    let mut ctx = Context { cx: &ps.span_diagnostic };
-    do_transform(&mut tr, &mut ctx);
+    {
+        let mut ctx = Context { cx: cx, use_valid_idents: true };
+        do_transform(&mut tr, &mut ctx);
+    }
     let time_2 = Instant::now();
     println!("parse:{} transform:{}", nanos(time_1 - time_0), nanos(time_2 - time_1));
     if tr.output.is_some() {
@@ -37,7 +40,7 @@ fn main() {
         write_to_file("/tmp/ppa", &pprust::tts_to_string(&tts));
         write_to_file("/tmp/ppb", &pprust::tts_to_string(tr.output_as_slice()));
         std::process::exit(1);
-    } else if ctx.cx.err_count() > 0 {
+    } else if cx.err_count() > 0 {
         println!("{}: got errors", filename);
         std::process::exit(1);
     } else {

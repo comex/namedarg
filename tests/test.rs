@@ -20,7 +20,11 @@ namedarg! {
         fn foo(#[default] a a: Option<T>) {}
     }
     impl NongenericNoParentTrait for i32 {
-        fn foo(#[default] a a: Option<T>) {}
+        fn foo(#[default] a a: Option<i32>) {}
+    }
+    struct Test;
+    impl Test {
+        fn foo(#[default] a a: Option<i32>) {}
     }
 
     fn default_func(x x: i32,
