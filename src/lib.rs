@@ -1,4 +1,4 @@
-#![feature(plugin_registrar, rustc_private, slice_patterns, relaxed_adts)]
+#![cfg_attr(not(feature = "use_rparse"), feature(plugin_registrar, rustc_private))]
 /*
 Known mishandled cases:
 macro_rules! a {
