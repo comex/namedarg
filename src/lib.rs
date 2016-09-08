@@ -21,14 +21,14 @@ macro_rules! if_debug_assertions { {$($stuff:tt)*} => {} }
 #[cfg(debug_assertions)]
 macro_rules! if_debug_assertions { {$($stuff:tt)*} => {$($stuff)*} }
 
-#[cfg(not(use_rparse))]
+#[cfg(not(feature = "use_rparse"))]
 macro_rules! if_rparse { {$($stuff:tt)*} => {} }
-#[cfg(use_rparse)]
+#[cfg(feature = "use_rparse")]
 macro_rules! if_rparse { {$($stuff:tt)*} => {$($stuff)*} }
 
-#[cfg(not(use_rparse))]
+#[cfg(not(feature = "use_rparse"))]
 macro_rules! if_not_rparse { {$($stuff:tt)*} => {$($stuff)*} }
-#[cfg(use_rparse)]
+#[cfg(feature = "use_rparse")]
 macro_rules! if_not_rparse { {$($stuff:tt)*} => {} }
 
 pub enum GetMode {

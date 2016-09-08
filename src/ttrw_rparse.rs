@@ -1,5 +1,5 @@
-use ::{GetMode, SpanToken, StorageCell, rparse}
-use ::rparse::{Lexer, token};
+use {GetMode, SpanToken, StorageCell, rparse};
+use rparse::{Lexer, token};
 use std::cell::UnsafeCell;
 pub type OutIdent = String;
 
@@ -39,8 +39,8 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
             token::CloseDelim(DelimToken::Brace) => "}",
             token::Ident(ident) => ident.as_str().unwrap(),
             _ => panic!("missing case"),
-        }
-
+        };
+        self.out.push_str(s);
     }
     pub fn write_ident(&mut self, ident_str: &str) {
         self.out.push_str(ident_str);
@@ -61,7 +61,7 @@ pub struct TTReader<'a> {
     splices: Vec<Splice>,
 }
 impl<'a> TTReader<'a> {
-    pub fn new(data: &'a [u8], span_storage: &'a UnsafeCell<Span>)) -> Self {
+    pub fn new(data: &'a [u8], span_storage: &'a UnsafeCell<Span>) -> Self {
         TTReader {
             data: data,
             lexer: Lexer::new(data),
@@ -112,7 +112,7 @@ impl<'a> TTReader<'a> {
         let ident = match lexer_copy.next() {
             token::Ident(ident) => ident,
             _ => unreachable!(),
-        }
+        };
         let new = f(ident);
         self.splices.push(Splice {
             pos: mark.pos,

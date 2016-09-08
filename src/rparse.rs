@@ -1,12 +1,12 @@
 fn Pattern_White_Space(c: char) -> bool {
     match c {
-        '\x09' .. '\x0d' | ' ' | '\x85' |
+        '\x09' ... '\x0d' | ' ' | '\u{85}' |
         '\u{200e}' | '\u{200f}' | '\u{2028}' | '\u{2029}' => true,
         _ => false
     }
 }
 
-#![derive(Clone, Copy)]
+#[derive(Clone, Copy)]
 struct Reader<'a> {
     data: &'a [u8],
     cur: u8,
@@ -72,7 +72,7 @@ pub struct Ident {
     name: Name,
 }
 macro_rules! define_idents {
-    {$($name:ident : $str:pat),*} => {
+    {$(($name:ident : $($str:tt)*)),*,} => {
         pub enum Name {
             $($name),*,
             Other
@@ -86,13 +86,13 @@ macro_rules! define_idents {
         impl Ident {
             pub fn from_bytes(bytes: &[u8]) -> Self {
                 match bytes {
-                    $($str => Some(keywords::$name)),*
+                    $($($str)* => Some(keywords::$name)),*,
                     _ => keywords::Other,
                 }
             }
             pub fn as_str(&self) -> Option<&str> {
                 match bytes {
-                    $(keywords::$name => Some($str)),*
+                    $(keywords::$name => Some($($str)*)),*,
                     keywords::Other => None,
                 }
             }
@@ -100,20 +100,20 @@ macro_rules! define_idents {
     }
 }
 define_idents! {
-    As: b"as",
-    Box: b"box",
-    Extern: b"extern",
-    Fn: b"fn",
-    For: b"for",
-    Impl: b"impl",
-    Mut: b"mut",
-    Ref: b"ref",
-    SelfType: b"Self",
-    SelfValue: b"self",
-    Super: b"super",
-    Trait: b"trait",
-    Unsafe: b"unsafe",
-    Where: b"where",
+    (As: b"as"),
+    (Box: b"box"),
+    (Extern: b"extern"),
+    (Fn: b"fn"),
+    (For: b"for"),
+    (Impl: b"impl"),
+    (Mut: b"mut"),
+    (Ref: b"ref"),
+    (SelfType: b"Self"),
+    (SelfValue: b"self"),
+    (Super: b"super"),
+    (Trait: b"trait"),
+    (Unsafe: b"unsafe"),
+    (Where: b"where"),
 }
 pub enum Token {
     OpenDelim(DelimToken),
@@ -125,7 +125,7 @@ pub enum Token {
     Pound,
     Not,
     Lt,
-    Gt
+    Gt,
     Comma,
     Colon,
     ModSep,
@@ -143,7 +143,7 @@ pub mod token {
     pub use Token::*;
 }
 
-#![derive(Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Lexer<'a> {
     read: Reader<'a>,
     lineno: usize,
@@ -174,7 +174,7 @@ impl<'a> Lexer<'a> {
                 }
                 break;
             },
-            b'\x00' .. b'\x7f' => { self.read.advance() },
+            b'\x00' ... b'\x7f' => { self.read.advance() },
             _ => { self.read.next_utf8(); },
         }
     }
@@ -189,7 +189,7 @@ impl<'a> Lexer<'a> {
     }
     fn scan_doublequote(&mut self) -> Token {
         while self.read.cur != b'"' {
-            if self.read.at_eof() { return Token::Eof; },
+            if self.read.at_eof() { return Token::Eof; }
             self.read_quoted_char();
         }
         Literal(())
@@ -270,21 +270,21 @@ impl<'a> Lexer<'a> {
                 b' ' | b'\t' | b'\r' => continue,
                 b'\n' => { self.bump_lineno(); continue },
                 b'a' ... b'z' | b'A' ... b'Z' | b'_' => self.read_ident(),
-                b'\x00' .. b'\x7f' => Token::Other,
+                b'\x00' ... b'\x7f' => Token::Other,
                 _ => {
                     if let Some(tok) = self.next_unicode(c) { tok } else { continue }
                 },
-            },
+            };
         }
 
     }
     pub fn pos(&self) -> usize {
         self.read.pos_of_cur()
     }
-    pub lineno(&self) -> usize {
+    pub fn lineno(&self) -> usize {
         self.lineno
     }
-    pub set_pos(&mut self, pos: usize) {
+    pub fn set_pos(&mut self, pos: usize) {
         self.lineno = 1000000;
         self.read.pos = pos;
         self.read.advance();
