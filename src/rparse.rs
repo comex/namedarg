@@ -90,6 +90,12 @@ macro_rules! define_idents {
                     _ => keywords::Other,
                 }
             }
+            pub fn as_str(&self) -> Option<&str> {
+                match bytes {
+                    $(keywords::$name => Some($str)),*
+                    keywords::Other => None,
+                }
+            }
         }
     }
 }
@@ -138,16 +144,27 @@ pub mod token {
 }
 
 #![derive(Clone, Copy)]
-struct Lexer<'a> {
+pub struct Lexer<'a> {
     read: Reader<'a>,
+    lineno: usize,
 }
 
 impl<'a> Lexer<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Lexer {
+            read: Reader::new(data),
+            lineno: 1,
+        }
+    }
+    fn bump_lineno(&mut self) {
+        self.lineno += 1;
+    }
     fn scan_quoted_char(&mut self) {
         match self.read.cur {
             b'\\' => loop {
                 match self.read.next() {
-                    b'\r' | b'\n' => { continue; },
+                    b'\r' => { continue; },
+                    b'\n' => { self.bump_lineno(); continue; },
                     b'x' => { self.read.advance_n(2); },
                     b'u' => {
                         if self.read.next() != b'{' { return; }
@@ -162,7 +179,7 @@ impl<'a> Lexer<'a> {
         }
     }
     fn scan_singlequote(&mut self) -> Token {
-        self.read_quoted_char();
+        self.scan_quoted_char();
         if self.read.cur == b'\'' {
             self.read.advance();
             Literal(())
@@ -178,10 +195,11 @@ impl<'a> Lexer<'a> {
         Literal(())
     }
     fn scan_slashstar_comment(&mut self) {
-
+        // XXX
     }
     fn skip_to_nl(&mut self) {
         while self.read.next() != b'\n' && !self.read.at_eof() {}
+        self.bump_lineno();
     }
     fn scan_ident(&mut self) -> Token {
         let start = self.read.pos_of_cur();
@@ -204,12 +222,13 @@ impl<'a> Lexer<'a> {
         self.read.rewind();
         let c = self.read.next_utf8();
         if Pattern_White_Space(c) {
+            if c == b'\n' { self.bump_lineno(); }
             return None;
         }
         // assume it's an ident
         return self.read_ident();
     }
-    fn next(&mut self) -> Token {
+    pub fn next(&mut self) -> Token {
         loop {
             return match self.read.next() {
                 b'/' => match self.read.cur {
@@ -248,7 +267,8 @@ impl<'a> Lexer<'a> {
                 b'\'' => self.read_singlequote(),
                 b'"' => self.read_doublequote(),
                 b'|' => Token::BinOp(BinOp::Or),
-                b' ' | b'\t' | b'\n' | b'\r' => continue,
+                b' ' | b'\t' | b'\r' => continue,
+                b'\n' => { self.bump_lineno(); continue },
                 b'a' ... b'z' | b'A' ... b'Z' | b'_' => self.read_ident(),
                 b'\x00' .. b'\x7f' => Token::Other,
                 _ => {
@@ -257,5 +277,16 @@ impl<'a> Lexer<'a> {
             },
         }
 
+    }
+    pub fn pos(&self) -> usize {
+        self.read.pos_of_cur()
+    }
+    pub lineno(&self) -> usize {
+        self.lineno
+    }
+    pub set_pos(&mut self, pos: usize) {
+        self.lineno = 1000000;
+        self.read.pos = pos;
+        self.read.advance();
     }
 }

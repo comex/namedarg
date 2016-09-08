@@ -1,10 +1,10 @@
 #![feature(rustc_private)]
 #[allow(plugin_as_library)]
 extern crate namedarg;
-use namedarg::{TTReader, do_transform, Context};
+use namedarg::{Storage, TTReader, do_transform, Context};
 extern crate syntax;
 use syntax::print::pprust;
-use syntax::parse::{ParseSess, token, filemap_to_tts};
+use syntax::parse::{ParseSess, filemap_to_tts};
 use syntax::tokenstream::TokenTree;
 use std::cell::UnsafeCell;
 use std::io::{Read, Write};
@@ -27,8 +27,8 @@ fn main() {
     let time_1 = Instant::now();
 
     let cx = &ps.span_diagnostic;
-    let token_storage = UnsafeCell::new(token::DotDot);
-    let mut tr = TTReader::new(&tts, &token_storage);
+    let storage = UnsafeCell::new(Storage::new());
+    let mut tr = TTReader::new(&tts, &storage);
     {
         let mut ctx = Context { cx: cx, use_valid_idents: true };
         do_transform(&mut tr, &mut ctx);

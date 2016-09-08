@@ -7,24 +7,6 @@ macro_rules! a {
 }
 */
 
-#[macro_use]
-extern crate syntax;
-extern crate syntax_pos;
-extern crate rustc_plugin;
-extern crate rustc_errors as errors;
-use syntax::tokenstream::{TokenTree, Delimited};
-use syntax::ext::base::{ExtCtxt, MacResult, MacEager};
-use syntax_pos::Span;
-use syntax::ast;
-pub use syntax::ast::Ident;
-use syntax::util::small_vector::SmallVector;
-#[allow(unused_imports)]
-use syntax::print::pprust;
-use rustc_plugin::registry::Registry;
-use syntax::parse::token;
-use syntax::parse::token::{Token, DelimToken};
-use syntax::parse::token::keywords;
-use std::rc::Rc;
 use std::mem::{replace, size_of, transmute};
 use std::cell::UnsafeCell;
 use std::slice;
@@ -49,55 +31,95 @@ macro_rules! if_not_rparse { {$($stuff:tt)*} => {$($stuff)*} }
 #[cfg(use_rparse)]
 macro_rules! if_not_rparse { {$($stuff:tt)*} => {} }
 
+pub enum GetMode {
+    InnerDepth(Mark),
+    OuterDepth,
+    SameDepth,
+}
+
+#[allow(dead_code)]
+pub struct Storage { span: Span, token: Token, }
+
+impl Storage {
+    pub fn new() -> Self {
+        Storage {
+            span: dummy_span(),
+            token: token::DotDot,
+        }
+    }
+}
+
+pub struct SpanToken<'a> {
+    span: &'a Span,
+    token: &'a Token,
+}
+
+enum Judge { Expected, Ignore, Unexpected, }
+
 if_not_rparse! {
-    macro_rules! other_unexpected { () => {
-        &token::Interpolated(..) | &token::MatchNt(..) | &token::SubstNt(..) |
-        &token::SpecialVarNt(..)
-    } }
-    macro_rules! other_expected { () => {
-        &token::Eq | &token::Le | &token::EqEq | &token::Ne | &token::Ge |
-        &token::Gt | &token::AndAnd | &token::OrOr | &token::Not | &token::Tilde |
-        &token::BinOp(_) | &token::BinOpEq(_) | &token::At | &token::Dot | &token::DotDot |
-        &token::DotDotDot | &token::ModSep | &token::Dollar |
-        &token::LArrow | &token::RArrow | &token::FatArrow
-    } }
-    macro_rules! other_ignore { () => {
-        &token::DocComment(..) | &token::Whitespace | &token::Comment | &token::Shebang(..) |
-        &token::Eof
-    } }
+    extern crate rustc_plugin;
+    extern crate rustc_errors as errors;
+    #[macro_use]
+    extern crate syntax;
+    extern crate syntax_pos;
+    use rustc_plugin::registry::Registry;
+    #[allow(unused_imports)]
+    use syntax::print::pprust;
+    use syntax::parse::token;
+    use syntax::parse::token::{Token, DelimToken};
+    use syntax::parse::token::keywords;
+    use syntax::tokenstream::TokenTree;
+    use syntax::ext::base::{ExtCtxt, MacResult, MacEager};
+    use syntax_pos::Span;
+    pub use syntax::ast::Ident;
+    use syntax::util::small_vector::SmallVector;
+
+    mod ttrw_libsyntax;
+    pub use ttrw_libsyntax::{TTWriter, TTReader, Mark, OutIdent, dummy_span};
+
+    fn judge_other_token(tok: &Token) -> Judge {
+        match tok {
+            &token::Interpolated(..) | &token::MatchNt(..) | &token::SubstNt(..) |
+            &token::SpecialVarNt(..) =>
+                Judge::Unexpected,
+            &token::Eq | &token::Le | &token::EqEq | &token::Ne | &token::Ge |
+            &token::Gt | &token::AndAnd | &token::OrOr | &token::Not | &token::Tilde |
+            &token::BinOp(_) | &token::BinOpEq(_) | &token::At | &token::Dot | &token::DotDot |
+            &token::DotDotDot | &token::ModSep | &token::Dollar |
+            &token::LArrow | &token::RArrow | &token::FatArrow =>
+                Judge::Expected,
+            &token::DocComment(..) | &token::Whitespace | &token::Comment | &token::Shebang(..) |
+            &token::Eof =>
+                Judge::Ignore,
+            &token::Ident(_) | &token::OpenDelim(_) | &token::CloseDelim(_) |
+            &token::Comma | &token::Colon | &token::Lt |
+            &token::Semi | &token::Question | &token::Literal(..) | &token::Underscore |
+            &token::Pound | &token::Lifetime(..) => unreachable!(),
+        }
+    }
 }
 if_rparse! {
-    macro_rules! other_unexpected { () => {
-        &token::Dummy
-    } }
-    macro_rules! other_expected { () => {
-        &token::Gt | &token::Not |
-        &token::BinOp(_) | &token::BinOpEq(_) | &token::DotDot |
-        &token::DotDotDot | &token::ModSep | &token::Dollar |
-        &token::Other
-    } }
-    macro_rules! other_ignore { () => {
-        &token::Eof
-    } }
+    mod rparse;
+    use rparse::{Ident, BinOp, DelimToken, Token, token, keywords};
+
+    mod ttrw_rparse;
+    pub use ttrw_libsyntax::{TTWriter, TTReader, Mark, Span, OutIdent, dummy_span};
+
+    fn judge_other_token(tok: &Token) -> Judge {
+        match tok {
+            &token::Dummy => Judge::Unexpected,
+            &token::Gt | &token::Not |
+            &token::BinOp(_) | &token::BinOpEq(_) | &token::DotDot |
+            &token::DotDotDot | &token::ModSep | &token::Dollar |
+            &token::Other =>
+                Judge::Expected,
+            &token::Eof => Judge::Ignore,
+        }
+    }
 }
 
-fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
-    -> Box<MacResult + 'static> {
-    let mut parser = cx.new_parser_from_tts(args);
-    let mut items = SmallVector::zero();
-    while let Some(item) = panictry!(parser.parse_item()) {
-        items.push(item);
-    }
-    if parser.token != token::Eof {
-        let token_str = parser.this_token_to_string();
-        let msg = format!("extra tokens starting with `{}`", token_str);
-        parser.diagnostic().span_err(parser.span, &msg);
-    }
-    MacEager::items(items)
-}
-
-fn mutate_name<'a, I>(fn_name_ident: &ast::Ident, arg_names: I, ctx: &Context) -> ast::Ident
-    where I: Iterator<Item=Option<&'a ast::Ident>> {
+fn mutate_name<'a, I>(fn_name_ident: &Ident, arg_names: I, ctx: &Context) -> OutIdent
+    where I: Iterator<Item=Option<&'a Ident>> {
     let mut name: String = (*fn_name_ident.name.as_str()).to_owned();
     if ctx.use_valid_idents {
         name.push_str("__lbl");
@@ -128,309 +150,11 @@ fn mutate_name<'a, I>(fn_name_ident: &ast::Ident, arg_names: I, ctx: &Context) -
     if !ctx.use_valid_idents {
         name.push('}');
     }
-    ast::Ident { name: token::intern(&name), ctxt: fn_name_ident.ctxt }
-}
-
-struct TTWriter<'x, 'a: 'x> {
-    tr: &'x mut TTReader<'a>,
-    output_stack: Vec<Vec<TokenTree>>,
-    output: Vec<TokenTree>,
-    span: Span,
-}
-
-impl<'x, 'a: 'x> TTWriter<'x, 'a> {
-    fn write(&mut self, tok: Token) {
-        //println!("*write* {:?}", tok);
-        match tok {
-            token::OpenDelim(_) => {
-                self.output_stack.push(replace(&mut self.output, Vec::new()));
-            },
-            token::CloseDelim(delim) => {
-                let mut output = self.output_stack.pop().unwrap();
-                output.push(TokenTree::Delimited(self.span, Rc::new(Delimited {
-                    delim: delim,
-                    open_span: self.span,
-                    tts: replace(&mut self.output, Vec::new()),
-                    close_span: self.span,
-                })));
-                self.output = output;
-            },
-            _ => {
-                self.output.push(TokenTree::Token(self.span, tok));
-            },
-        }
+    if_rparse! {
+        name
     }
-    fn copy_from_mark_range(&mut self, start: Mark, end: Mark, gm: GetMode) {
-        //println!("CFMR: enter={:?} start={:?} end={:?}", enter, start, end);
-        //println!("CFMR: have {:?}",self.output);
-        let to_add: Vec<TokenTree> = self.replacing_output(|tr| tr.get(start, end, gm).to_owned());
-        let token_storage = UnsafeCell::new(token::DotDot);
-        let mut tr2 = TTReader::new(&to_add, &token_storage);
-        while let Some(st) = tr2.next() {
-            self.write(st.token.clone());
-        }
-        //println!("CFMR out");
-    }
-    fn replacing_output<O, F: FnOnce(&mut TTReader<'a>) -> O>(&mut self, f: F) -> O {
-        let ptr = if self.output_stack.is_empty() { &mut self.output } else { self.output_stack.first_mut().unwrap() };
-        self.tr.output = Some(replace(ptr, Vec::new()));
-        let o = f(self.tr);
-        *ptr = replace(&mut self.tr.output, None).unwrap();
-        o
-    }
-    fn last_normal_token(&mut self) -> Option<&mut Token> {
-        match self.output.last_mut() {
-            Some(&mut TokenTree::Token(_, ref mut token)) => Some(token),
-            _ => None,
-        }
-    }
-    fn finish(mut self) {
-        assert!(self.output_stack.is_empty());
-        self.tr.cur_offset = self.output.len();
-        self.tr.output = Some(self.output);
-    }
-}
-
-struct SpanToken<'a> {
-    span: &'a Span,
-    token: &'a Token,
-}
-
-pub struct TTReader<'a> {
-    stack: Vec<(&'a [TokenTree], &'a [TokenTree], Option<Vec<TokenTree>>)>,
-    whole: &'a [TokenTree],
-    cur: &'a [TokenTree],
-    cur_offset: usize,
-    pub output: Option<Vec<TokenTree>>,
-    token_storage: &'a UnsafeCell<Token>,
-}
-
-#[cfg(debug_assertions)]
-type MarkCurStackDepth = usize;
-#[cfg(debug_assertions)] #[inline(always)]
-fn make_cur_stack_depth(x: usize) -> MarkCurStackDepth { x }
-#[cfg(not(debug_assertions))]
-type MarkCurStackDepth = ();
-#[cfg(not(debug_assertions))] #[inline(always)]
-fn make_cur_stack_depth(_: usize) -> MarkCurStackDepth { () }
-
-#[derive(Copy, Clone)]
-#[cfg_attr(feature = "derive_debug", derive(Debug))]
-pub struct Mark {
-    cur_stack_depth: MarkCurStackDepth,
-    cur_offset: usize,
-}
-/*
-impl Mark {
-    fn dummy() -> Self {
-        Mark { cur_len: !0usize / 2, cur_stack_depth: make_cur_stack_depth(!0usize / 2) }
-    }
-}
-*/
-enum GetMode {
-    InnerDepth(Mark),
-    OuterDepth,
-    SameDepth,
-}
-
-impl<'a> TTReader<'a> {
-    pub fn new(initial: &'a [TokenTree], token_storage: &'a UnsafeCell<Token>) -> Self {
-        TTReader {
-            stack: Vec::new(),
-            whole: initial,
-            cur: initial,
-            cur_offset: 0,
-            output: None,
-            token_storage: token_storage,
-        }
-    }
-    pub fn output_as_slice(&self) -> &[TokenTree] {
-        if let Some(ref output) = self.output {
-            &output[..]
-        } else {
-            self.whole
-        }
-    }
-    fn next<'b, 'x>(&'x mut self) -> Option<SpanToken<'a>> {
-        let otok: Option<&'a TokenTree> = self.cur.get(0);
-        if let Some(tok) = otok {
-            let tok: &'a TokenTree = tok;
-            match tok {
-                &TokenTree::Token(ref span, ref token) => {
-                    let span: &'a Span = span;
-                    let token: &'a Token = token;
-                    self.cur = &self.cur[1..];
-                    self.cur_offset += 1;
-                    if let Some(ref mut output) = self.output {
-                        output.push(tok.clone());
-                    }
-                    Some(SpanToken { span: span, token: token })
-                },
-                &TokenTree::Delimited(ref span, ref delimed) => {
-                    let span: &'a Span = span;
-                    let delimed: &'a Delimited = delimed;
-                    let tts = &delimed.tts[..];
-                    let p = (
-                        replace(&mut self.whole, tts),
-                        replace(&mut self.cur, tts),
-                        replace(&mut self.output, None),
-                    );
-                    self.stack.push(p);
-                    self.cur_offset = 0;
-                    unsafe {
-                        let ptr = self.token_storage.get();
-                        *ptr = token::OpenDelim(delimed.delim);
-                        Some(SpanToken { span: span, token: &*ptr })
-                    }
-                },
-                _ => panic!("unexpected tt type"),
-            }
-        } else {
-            if let Some((pwhole, pcur, poutput)) = self.stack.pop() {
-                if let TokenTree::Delimited(ref span, ref delimed) = pcur[0] {
-                    let old_whole = replace(&mut self.whole, pwhole);
-                    self.cur = &pcur[1..];
-                    let old_output = replace(&mut self.output, poutput);
-                    if let Some(ref mut output) = self.output {
-                        let tts = old_output.unwrap_or_else(|| old_whole.to_owned());
-                        output.push(TokenTree::Delimited(span.clone(), Rc::new(Delimited {
-                            tts: tts,
-                            ..**delimed
-                        })));
-                        self.cur_offset = output.len();
-                    } else if let Some(tts) = old_output {
-                        let mut new_output = self.whole[..self.offset_in_whole()-1].to_owned();
-                        new_output.push(TokenTree::Delimited(span.clone(), Rc::new(Delimited {
-                            tts: tts,
-                            ..**delimed
-                        })));
-                        self.cur_offset = new_output.len();
-                        self.output = Some(new_output);
-                    } else {
-                        self.cur_offset = self.whole.len() - self.cur.len();
-                    }
-                    unsafe {
-                        let ptr = self.token_storage.get();
-                        *ptr = token::CloseDelim(delimed.delim);
-                        Some(SpanToken { span: span, token: &*ptr })
-                    }
-                } else {
-                    panic!("bad stack");
-                }
-            } else {
-                None
-            }
-        }
-    }
-    fn mark_last(&self) -> Mark {
-        self.check_offset();
-        if self.cur_offset == 0 {
-            let &(pwhole, pcur, ref poutput) = self.stack.last().unwrap();
-            let pos = if let &Some(ref poutput) = poutput {
-                poutput.len()
-            } else {
-                pwhole.len() - pcur.len()
-            };
-            Mark {
-                cur_offset: pos,
-                cur_stack_depth: make_cur_stack_depth(self.stack.len() - 1),
-            }
-        } else {
-            Mark {
-                cur_offset: self.cur_offset - 1,
-                cur_stack_depth: make_cur_stack_depth(self.stack.len()),
-            }
-        }
-    }
-    fn mark_next(&self) -> Mark {
-        self.check_offset();
-        Mark {
-            cur_offset: self.cur_offset,
-            cur_stack_depth: make_cur_stack_depth(self.stack.len()),
-        }
-    }
-    #[cfg(debug_assertions)]
-    fn check_offset(&self) {
-        assert_eq!(self.cur_offset, if let Some(ref o) = self.output { o.len() } else { self.offset_in_whole() });
-    }
-    #[cfg(not(debug_assertions))]
-    fn check_offset(&self) {}
-    fn offset_in_whole(&self) -> usize {
-        self.whole.len() - self.cur.len()
-    }
-    fn delete_from_mark(&mut self, mark: Mark, count: usize) {
-        //println!("dfm({})", count);
-        self.check_mark(mark);
-        let offset = mark.cur_offset;
-        let cur_offset = self.cur_offset;
-        if let Some(ref mut output) = self.output {
-            //println!("dfm: old ({:?})", output);
-            //println!("offset = {} len = {}", offset, output.len());
-            for _ in 0..count {
-                output.remove(offset);
-            }
-            self.cur_offset = output.len();
-        } else {
-            //println!("dfm: new");
-            let mut vec = self.whole[..offset].to_owned();
-            vec.extend_from_slice(&self.whole[offset+count..cur_offset]);
-            self.cur_offset = vec.len();
-            self.output = Some(vec);
-        }
-        //println!("dfm: now we look like {}", pprust::tts_to_string(self.output.as_ref().unwrap()));
-        //println!("...cur is {}", pprust::tts_to_string(self.cur));
-    }
-    fn mutate_mark(&mut self, mark: Mark) -> &mut TokenTree {
-        self.check_mark(mark);
-        let offset = mark.cur_offset;
-        if self.output.is_none() {
-            self.output = Some(self.whole[..self.cur_offset].to_owned());
-        }
-        &mut self.output.as_mut().unwrap()[offset]
-    }
-    fn writer<'x>(&'x mut self, span: Span) -> TTWriter<'x, 'a> {
-        let output = if let Some(output) = replace(&mut self.output, None) {
-            output
-        } else {
-            self.whole[..self.cur_offset].to_owned()
-        };
-        TTWriter { tr: self, output_stack: Vec::new(), output: output, span: span }
-    }
-    fn check_mark(&self, _mark: Mark) {
-        if_debug_assertions! {
-            assert_eq!(_mark.cur_stack_depth, self.stack.len());
-        }
-    }
-    fn get(&self, start: Mark, end: Mark, gm: GetMode) -> &[TokenTree] {
-        if_debug_assertions! {
-            assert_eq!(start.cur_stack_depth, end.cur_stack_depth);
-        }
-        let _cur_stack_depth = self.stack.len();
-        let base = if let Some(ref out) = self.output { &out[..] } else { self.whole };
-        let base = match gm {
-            GetMode::InnerDepth(mark) => {
-                if_debug_assertions! {
-                    assert_eq!(start.cur_stack_depth, _cur_stack_depth + 1);
-                    assert_eq!(mark.cur_stack_depth, _cur_stack_depth);
-                }
-                if let &TokenTree::Delimited(_, ref delimed) = &base[mark.cur_offset] {
-                    &delimed.tts[..]
-                } else { unreachable!() }
-            },
-            GetMode::OuterDepth => {
-                if_debug_assertions! {
-                    assert_eq!(start.cur_stack_depth, _cur_stack_depth - 1);
-                }
-                self.stack.last().unwrap().0
-            },
-            GetMode::SameDepth => {
-                if_debug_assertions! {
-                    assert_eq!(start.cur_stack_depth, _cur_stack_depth);
-                }
-                base
-            },
-        };
-        &base[start.cur_offset..end.cur_offset]
+    if_not_rparse! {
+        Ident { name: token::intern(&name), ctxt: fn_name_ident.ctxt }
     }
 }
 
@@ -674,17 +398,14 @@ impl<X: Copy> XAndCommon<X> {
     }
 }
 
-fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &ast::Ident, new_full_name: &ast::Ident, cur_in_trait_or_impl: Option<&'static VariantData::InTraitOrImpl>, ctx: &Context) {
-    let none_ident = Ident::with_empty_ctxt(token::intern("None"));
-    let allow_ident = Ident::with_empty_ctxt(token::intern("allow"));
-    let dead_code_ident = Ident::with_empty_ctxt(token::intern("dead_code"));
-    let mut tw = tr.writer(syntax_pos::COMMAND_LINE_SP);
+fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &Ident, new_full_name: &Ident, cur_in_trait_or_impl: Option<&'static VariantData::InTraitOrImpl>, ctx: &Context) {
+    let mut tw: TTWriter = tr.writer();
     // #[allow(dead_code)]
     tw.write(token::Pound);
     tw.write(token::OpenDelim(DelimToken::Bracket));
-    tw.write(token::Ident(allow_ident));
+    tw.write_ident("allow");
     tw.write(token::OpenDelim(DelimToken::Paren));
-    tw.write(token::Ident(dead_code_ident));
+    tw.write_ident("dead_code");
     tw.write(token::CloseDelim(DelimToken::Paren));
     tw.write(token::CloseDelim(DelimToken::Bracket));
 
@@ -707,17 +428,17 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
     }
     tw.write(token::OpenDelim(DelimToken::Paren));
     let mut i = 0;
-    let mut arg_names: Vec<Ident> = Vec::with_capacity(args.len());
+    let mut arg_names: Vec<String> = Vec::with_capacity(args.len());
     for &XAndCommon { x: ref arg, .. } in args {
         if arg.is_default {
             i += 1;
             if i > num_include {
-                arg_names.push(none_ident);
+                arg_names.push("None".to_owned());
                 continue;
             }
         }
-        let arg_name = Ident::with_empty_ctxt(token::intern(&format!("x{}", arg_names.len())));
-        tw.write(Token::Ident(arg_name));
+        let arg_name = format!("x{}", arg_names.len());
+        tw.write_ident(&arg_name);
         arg_names.push(arg_name);
         tw.write(token::Colon);
         if let (Some(start), Some(end)) = (arg.ty_start, arg.ty_end) {
@@ -755,7 +476,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
     tw.write(token::Ident(*new_full_name));
     tw.write(token::OpenDelim(DelimToken::Paren));
     for name in arg_names {
-        tw.write(token::Ident(name));
+        tw.write_ident(&name);
         tw.write(token::Comma);
     }
     tw.write(token::CloseDelim(DelimToken::Paren));
@@ -915,9 +636,6 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         pushx!(VariantData::LambdaEnd);
                         continue_next!(State::Null { expecting_operator: false, after_semi_or_brace: false });
                     },
-                    other_expected!() => {
-                        expecting_operator = false;
-                    },
                     &token::Semi => {
                         after_semi_or_brace = true;
                         expecting_operator = false;
@@ -932,11 +650,12 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                     &token::Lifetime(..) => {
                         // this is probably actually a type
                     }
-                    other_ignore!() => {
-                        // don't really affect the AST
-                    },
-                    other_unexpected!() => {
-                        panic!("shouldn't get tokens like {:?}", st.token);
+                    _ => match judge_other_token(st.token) {
+                        Judge::Expected => expecting_operator = false,
+                        Judge::Ignore => (),
+                        Judge::Unexpected => {
+                            panic!("shouldn't get tokens like {:?}", st.token);
+                        }
                     },
                 }
                 st = st_or_return!();
@@ -1003,7 +722,8 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         let mark = tr.mark_last();
                         let st2 = st_or_return!();
                         if let &token::Colon = st2.token {
-                            tr.delete_from_mark(mark, 2);
+                            let to = tr.mark_next();
+                            tr.delete_mark_range(mark, to);
                             pushx_manual!(StateVariant::CallArg, Some(*ident));
                             pushx!(VariantData::CallArgStart);
                             in_func_parens = true;
@@ -1042,13 +762,11 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                             }
                         }
                         if any {
-                            let name = tr.mutate_mark(orig_name);
-                            if let TokenTree::Token(_, token::Ident(ref mut ident)) = *name {
+                            tr.mutate_ident(orig_name, |ident| {
                                 let cavs: &'static [XAndCommon<Option<Ident>>] = unsafe { slice::from_raw_parts(transmute(first_arg.ptr()), num_args) };
                                 let arg_names = cavs.iter().map(|cav| cav.x.as_ref());
-                                let new_name = mutate_name(ident, arg_names, ctx);
-                                *ident = new_name;
-                            } else { unreachable!() }
+                                mutate_name(&ident, arg_names, ctx)
+                            });
                         }
                         in_func_parens = true;
                         continue_same!(State::Null { expecting_operator: true, after_semi_or_brace: false });
@@ -1082,7 +800,8 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         let st2 = st_or_return!();
                         match st2.token {
                             &token::Ident(ident2) => {
-                                tr.delete_from_mark(to_delete, 1);
+                                let to = tr.mark_last();
+                                tr.delete_mark_range(to_delete, to);
                                 match st.token {
                                     &token::Ident(ident1) => {
                                         pushx_manual!(StateVariant::DeclArg, DeclArg { name: Some(ident1), ty_start: None, ty_end: None, is_default: pending_default });
@@ -1104,7 +823,8 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                                 // reference/pointer/dontcare patterns
                                 match st.token {
                                     &token::Ident(ident1) => {
-                                        tr.delete_from_mark(to_delete, 1);
+                                        let to = tr.mark_last();
+                                        tr.delete_mark_range(to_delete, to);
                                         pushx_manual!(StateVariant::DeclArg, DeclArg { name: Some(ident1), ty_start: None, ty_end: None, is_default: pending_default });
                                         pushx!(VariantData::DeclArgStart { pending_default: false });
                                     },
@@ -1152,20 +872,15 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                             }
                         }
                         if any {
-                            let new_full_name: ast::Ident;
-                            let old_name: ast::Ident;
+                            let mut old_new: Option<(Ident, Ident)> = None;
                             let davs: &'static [XAndCommon<DeclArg>] = unsafe { slice::from_raw_parts(transmute(first_arg.ptr()), num_args) };
-                            {
-                                let name = tr.mutate_mark(decl.name);
-                                if let TokenTree::Token(_, token::Ident(ref mut ident)) = *name {
-                                    old_name = *ident;
-                                    new_full_name = mutate_name(ident, davs.iter().map(|dav| dav.x.name.as_ref()), ctx);
-                                    *ident = new_full_name;
-                                } else {
-                                    unreachable!();
-                                }
-                            }
+                            tr.mutate_ident(decl.name, |orig_ident| {
+                                let new_full_name = mutate_name(&orig_ident, davs.iter().map(|dav| dav.x.name.as_ref()), ctx);
+                                old_new = Some((orig_ident, new_full_name));
+                                new_full_name
+                            });
                             // generate stubs for default arguments
+                            let (old_name, new_full_name) = old_new.unwrap();
                             if any_default {
                                 sp = save;
                                 pushx!(VariantData::DeclEnd { first_arg: first_arg, decl: decl, davs: davs, old_name: old_name, new_full_name: new_full_name, args_end: args_end_mark, decl_end: None });
@@ -1183,8 +898,8 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                                 if ident.name == default_name { // #[default
                                     let st4 = st_or_return!();
                                     if let &token::CloseDelim(DelimToken::Bracket) = st2.token { // #[default]
-                                        // this is only 2 TokenTrees
-                                        tr.delete_from_mark(attr_start, 2);
+                                        let to = tr.mark_next();
+                                        tr.delete_mark_range(attr_start, to);
                                         if pending_default {
                                             ctx.cx.span_err(*st2.span, "duplicate #[default]");
                                         }
@@ -1251,9 +966,9 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         if angle_depth == 1 {
                             // yuck
                             unsafe {
-                                let ptr = tr.token_storage.get();
-                                *ptr = token::Gt;
-                                st.token = &*ptr;
+                                let ptr = tr.storage.get();
+                                (*ptr).token = token::Gt;
+                                st.token = &(*ptr).token;
                             }
                             continue_same!(State::Pop);
                         } else {
@@ -1489,22 +1204,39 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
     }
 }
 
-fn expand_namedarg<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree])
+if_not_rparse! {
+    fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
         -> Box<MacResult + 'static> {
-    let token_storage = UnsafeCell::new(token::DotDot);
-    let mut tr = TTReader::new(args, &token_storage);
-    {
-        let mut ctx = Context { cx: cx, use_valid_idents: false };
-        do_transform(&mut tr, &mut ctx);
+        let mut parser = cx.new_parser_from_tts(args);
+        let mut items = SmallVector::zero();
+        while let Some(item) = panictry!(parser.parse_item()) {
+            items.push(item);
+        }
+        if parser.token != token::Eof {
+            let token_str = parser.this_token_to_string();
+            let msg = format!("extra tokens starting with `{}`", token_str);
+            parser.diagnostic().span_err(parser.span, &msg);
+        }
+        MacEager::items(items)
     }
-    let output = tr.output_as_slice();
-    //println!("==> {}", pprust::tts_to_string(output));
-    passthrough_items(cx, output)
+
+
+    fn expand_namedarg<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree])
+            -> Box<MacResult + 'static> {
+        let storage = UnsafeCell::new(Storage::new());
+        let mut tr = TTReader::new(args, &storage);
+        {
+            let mut ctx = Context { cx: cx, use_valid_idents: false };
+            do_transform(&mut tr, &mut ctx);
+        }
+        let output = tr.output_as_slice();
+        //println!("==> {}", pprust::tts_to_string(output));
+        passthrough_items(cx, output)
+    }
+
+
+    #[plugin_registrar]
+    pub fn plugin_registrar(reg: &mut Registry) {
+        reg.register_macro("namedarg", expand_namedarg);
+    }
 }
-
-
-#[plugin_registrar]
-pub fn plugin_registrar(reg: &mut Registry) {
-    reg.register_macro("namedarg", expand_namedarg);
-}
-
