@@ -39,6 +39,48 @@ macro_rules! if_debug_assertions { {$($stuff:tt)*} => {} }
 #[cfg(debug_assertions)]
 macro_rules! if_debug_assertions { {$($stuff:tt)*} => {$($stuff)*} }
 
+#[cfg(not(use_rparse))]
+macro_rules! if_rparse { {$($stuff:tt)*} => {} }
+#[cfg(use_rparse)]
+macro_rules! if_rparse { {$($stuff:tt)*} => {$($stuff)*} }
+
+#[cfg(not(use_rparse))]
+macro_rules! if_not_rparse { {$($stuff:tt)*} => {$($stuff)*} }
+#[cfg(use_rparse)]
+macro_rules! if_not_rparse { {$($stuff:tt)*} => {} }
+
+if_not_rparse! {
+    macro_rules! other_unexpected { () => {
+        &token::Interpolated(..) | &token::MatchNt(..) | &token::SubstNt(..) |
+        &token::SpecialVarNt(..)
+    } }
+    macro_rules! other_expected { () => {
+        &token::Eq | &token::Le | &token::EqEq | &token::Ne | &token::Ge |
+        &token::Gt | &token::AndAnd | &token::OrOr | &token::Not | &token::Tilde |
+        &token::BinOp(_) | &token::BinOpEq(_) | &token::At | &token::Dot | &token::DotDot |
+        &token::DotDotDot | &token::ModSep | &token::Dollar |
+        &token::LArrow | &token::RArrow | &token::FatArrow
+    } }
+    macro_rules! other_ignore { () => {
+        &token::DocComment(..) | &token::Whitespace | &token::Comment | &token::Shebang(..) |
+        &token::Eof
+    } }
+}
+if_rparse! {
+    macro_rules! other_unexpected { () => {
+        &token::Dummy
+    } }
+    macro_rules! other_expected { () => {
+        &token::Gt | &token::Not |
+        &token::BinOp(_) | &token::BinOpEq(_) | &token::DotDot |
+        &token::DotDotDot | &token::ModSep | &token::Dollar |
+        &token::Other
+    } }
+    macro_rules! other_ignore { () => {
+        &token::Eof
+    } }
+}
+
 fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
     -> Box<MacResult + 'static> {
     let mut parser = cx.new_parser_from_tts(args);
@@ -873,11 +915,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         pushx!(VariantData::LambdaEnd);
                         continue_next!(State::Null { expecting_operator: false, after_semi_or_brace: false });
                     },
-                    &token::Eq | &token::Le | &token::EqEq | &token::Ne | &token::Ge |
-                    &token::Gt | &token::AndAnd | &token::OrOr | &token::Not | &token::Tilde |
-                    &token::BinOp(_) | &token::BinOpEq(_) | &token::At | &token::Dot | &token::DotDot |
-                    &token::DotDotDot | &token::ModSep |
-                    &token::LArrow | &token::RArrow | &token::FatArrow | &token::Dollar => {
+                    other_expected!() => {
                         expecting_operator = false;
                     },
                     &token::Semi => {
@@ -894,12 +932,10 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                     &token::Lifetime(..) => {
                         // this is probably actually a type
                     }
-                    &token::DocComment(..) | &token::Whitespace | &token::Comment | &token::Shebang(..) |
-                    &token::Eof => {
+                    other_ignore!() => {
                         // don't really affect the AST
                     },
-                    &token::Interpolated(..) | &token::MatchNt(..) | &token::SubstNt(..) |
-                    &token::SpecialVarNt(..) => {
+                    other_unexpected!() => {
                         panic!("shouldn't get tokens like {:?}", st.token);
                     },
                 }
