@@ -8,11 +8,14 @@ use syntax_pos::Span;
 use std::mem::replace;
 use std::rc::Rc;
 use std::cell::UnsafeCell;
+
 pub type OutIdent = Ident;
+pub fn out_ident_from_ident(ident: &Ident) -> OutIdent { *indent }
 
 pub fn dummy_span() -> Span {
     syntax_pos::COMMAND_LINE_SP
 }
+
 
 pub struct TTWriter<'x, 'a: 'x> {
     tr: &'x mut TTReader<'a>,

@@ -75,7 +75,7 @@ if_not_rparse! {
     use syntax::util::small_vector::SmallVector;
 
     mod ttrw_libsyntax;
-    pub use ttrw_libsyntax::{TTWriter, TTReader, Mark, OutIdent, dummy_span};
+    pub use ttrw_libsyntax::{TTWriter, TTReader, Mark, OutIdent, dummy_span, out_ident_from_ident};
 
     fn judge_other_token(tok: &Token) -> Judge {
         match tok {
@@ -100,17 +100,17 @@ if_not_rparse! {
 }
 if_rparse! {
     mod rparse;
-    use rparse::{Ident, BinOp, DelimToken, Token, token, keywords};
+    pub use rparse::{Ident, BinOp, DelimToken, Token, token, keywords};
 
     mod ttrw_rparse;
-    pub use ttrw_libsyntax::{TTWriter, TTReader, Mark, Span, OutIdent, dummy_span};
+    pub use ttrw_rparse::{TTWriter, TTReader, Mark, Span, OutIdent, dummy_span, out_ident_from_ident};
 
     fn judge_other_token(tok: &Token) -> Judge {
         match tok {
             &token::Dummy => Judge::Unexpected,
             &token::Gt | &token::Not |
-            &token::BinOp(_) | &token::BinOpEq(_) | &token::DotDot |
-            &token::DotDotDot | &token::ModSep | &token::Dollar |
+            &token::BinOp(_) | &token::DotDot | &token::DotDotDot |
+            &token::ModSep | &token::Dollar |
             &token::Other =>
                 Judge::Expected,
             &token::Eof => Judge::Ignore,
@@ -145,7 +145,7 @@ fn mutate_name<'a, I>(fn_name_ident: &Ident, arg_names: I, ctx: &Context) -> Out
     }
     if !any {
         // if all arguments defaulted, use an untransformed ident
-        return *fn_name_ident;
+        return out_ident_from_ident(fn_name_ident);
     }
     if !ctx.use_valid_idents {
         name.push('}');
@@ -163,13 +163,26 @@ pub trait ExtCtxtish {
     fn span_warn(&self, sp: Span, msg: &str);
 }
 
-impl<'a> ExtCtxtish for ExtCtxt<'a> {
-    fn span_err(&self, sp: Span, msg: &str) { ExtCtxt::span_err(self, sp, msg) }
-    fn span_warn(&self, sp: Span, msg: &str) { ExtCtxt::span_warn(self, sp, msg) }
+if_rparse! {
+    struct DummyExtCtxt;
+    impl ExtCtxtish for DummyExtCtxt {
+        fn span_err(&self, sp: Span, msg: &str) {
+            println!("{}:{}: error: {}", sp.line, sp.col, msg);
+        }
+        fn span_warn(&self, sp: Span, msg: &str) {
+            println!("{}:{}: warning: {}", sp.line, sp.col, msg);
+        }
+    }
 }
-impl ExtCtxtish for errors::Handler {
-    fn span_err(&self, sp: Span, msg: &str) { errors::Handler::span_err(self, sp, msg) }
-    fn span_warn(&self, sp: Span, msg: &str) { errors::Handler::span_warn(self, sp, msg) }
+if_not_rparse! {
+    impl<'a> ExtCtxtish for ExtCtxt<'a> {
+        fn span_err(&self, sp: Span, msg: &str) { ExtCtxt::span_err(self, sp, msg) }
+        fn span_warn(&self, sp: Span, msg: &str) { ExtCtxt::span_warn(self, sp, msg) }
+    }
+    impl ExtCtxtish for errors::Handler {
+        fn span_err(&self, sp: Span, msg: &str) { errors::Handler::span_err(self, sp, msg) }
+        fn span_warn(&self, sp: Span, msg: &str) { errors::Handler::span_warn(self, sp, msg) }
+    }
 }
 
 pub struct Context<'x> {
@@ -485,7 +498,6 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
 }
 
 pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
-    let default_name = token::intern("default");
     let mut state: State = State::Null { expecting_operator: false, after_semi_or_brace: true };
     let mut delim_depth: u32 = 0;
     let mut in_func_parens: bool = false;
@@ -552,7 +564,13 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                     &token::Ident(ref ident) => {
                         // XXX trait, attr
                         let name = ident.name;
-                        if name.0 >= keywords::Default.name().0 ||
+                        if_rparse! {
+                            let big = false;
+                        }
+                        if_not_rparse! {
+                            let big = name.0 >= keywords::Default.name().0;
+                        }
+                        if big ||
                            name == keywords::SelfValue.name() ||
                            name == keywords::SelfType.name() ||
                            name == keywords::Super.name() {
@@ -895,7 +913,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         if let &token::OpenDelim(DelimToken::Bracket) = st2.token { // #[
                             let st3 = st_or_return!();
                             if let &token::Ident(ident) = st3.token {
-                                if ident.name == default_name { // #[default
+                                if ident.name == keywords::Default.name() { // #[default
                                     let st4 = st_or_return!();
                                     if let &token::CloseDelim(DelimToken::Bracket) = st2.token { // #[default]
                                         let to = tr.mark_next();

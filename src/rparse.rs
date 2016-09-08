@@ -1,7 +1,8 @@
-fn Pattern_White_Space(c: char) -> bool {
+use std::str;
+fn Pattern_White_Space(c: u32) -> bool {
     match c {
-        '\x09' ... '\x0d' | ' ' | '\u{85}' |
-        '\u{200e}' | '\u{200f}' | '\u{2028}' | '\u{2029}' => true,
+        0x9 ... 0xd | 0x20 | 0x85 |
+        0x200e | 0x200f | 0x2028 | 0x2029 => true,
         _ => false
     }
 }
@@ -17,13 +18,13 @@ impl<'a> Reader<'a> {
     fn new(data: &'a [u8]) -> Self {
         Reader {
             data: data,
-            cur: self.data.get(0).unwrap_or(0),
+            cur: if let Some(&c) = data.get(0) { c } else { b'\0' },
             pos: 1,
         }
     }
     #[inline]
     fn advance(&mut self) {
-        if let Some(c) = self.data.get(self.pos) {
+        if let Some(&c) = self.data.get(self.pos) {
             self.cur = c;
             self.pos += 1;
         } else {
@@ -42,9 +43,18 @@ impl<'a> Reader<'a> {
     fn next_utf8(&mut self) -> u32 {
         let c = self.next();
         let mut num_bytes = (!c).leading_zeros();
-        // in case of invalid chars
-        if num_bytes > 4 { num_bytes = 0; }
-        self.advance_n(num_bytes);
+        match num_bytes {
+            2 | 3 | 4 => (),
+            _ => return c as u32,
+        }
+        let mut chr = (c & (0x7f >> num_bytes)) as u32;
+        for i in 0..num_bytes {
+            let c = self.cur;
+            if c & 0xc0 != 0x80 { break; }
+            self.advance();
+            chr = (chr << 6) | (c & 0x3f) as u32;
+        }
+        chr
     }
     fn rewind(&mut self) {
         self.pos -= 1;
@@ -66,34 +76,55 @@ pub enum DelimToken {
     Brace,
 }
 pub enum BinOp {
+    And,
     Or,
+    Star,
+    Plus,
+    Shr,
 }
+#[derive(Copy, Clone)]
 pub struct Ident {
-    name: Name,
+    pub name: Name,
+}
+#[derive(Copy, Clone)]
+pub struct Keyword {
+    pub ident: Ident,
+}
+impl Keyword {
+    fn ident(self) -> Ident { self.ident }
+    fn name(self) -> Name { self.ident.name }
 }
 macro_rules! define_idents {
     {$(($name:ident : $($str:tt)*)),*,} => {
+        #[derive(Copy, Clone)]
         pub enum Name {
             $($name),*,
             Other
         }
         pub mod keywords {
+            use super::{Ident, Name, Keyword};
             $(
-                pub const $name: Ident = Ident { name: Name::$name };
+                pub const $name: Keyword = Keyword { ident: Ident { name: Name::$name } };
             )*
-            pub const Other: Ident = Ident { name: Name::Other };
+            pub const Other: Keyword = Keyword { ident: Ident { name: Name::Other } };
+        }
+        impl Name {
+            pub fn as_str(&self) -> &'static str {
+                match *self {
+                    $(
+                        Name::$name => unsafe {
+                            str::from_utf8_unchecked($($str)*)
+                        }
+                    ),*,
+                    Name::Other => unreachable!(),
+                }
+            }
         }
         impl Ident {
             pub fn from_bytes(bytes: &[u8]) -> Self {
                 match bytes {
-                    $($($str)* => Some(keywords::$name)),*,
+                    $($($str)* => keywords::$name),*,
                     _ => keywords::Other,
-                }
-            }
-            pub fn as_str(&self) -> Option<&str> {
-                match bytes {
-                    $(keywords::$name => Some($($str)*)),*,
-                    keywords::Other => None,
                 }
             }
         }
@@ -102,6 +133,7 @@ macro_rules! define_idents {
 define_idents! {
     (As: b"as"),
     (Box: b"box"),
+    (Default: b"default"),
     (Extern: b"extern"),
     (Fn: b"fn"),
     (For: b"for"),
@@ -133,6 +165,8 @@ pub enum Token {
     Question,
     Dollar,
     Underscore,
+    Eq,
+    RArrow,
     Literal(()),
     Lifetime(()),
     BinOp(BinOp),
@@ -141,12 +175,14 @@ pub enum Token {
 }
 pub mod token {
     pub use Token::*;
+    pub use BinOp::*;
 }
 
 #[derive(Clone, Copy)]
 pub struct Lexer<'a> {
     read: Reader<'a>,
     lineno: usize,
+    line_start_pos: usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -154,10 +190,12 @@ impl<'a> Lexer<'a> {
         Lexer {
             read: Reader::new(data),
             lineno: 1,
+            line_start_pos: 0,
         }
     }
     fn bump_lineno(&mut self) {
         self.lineno += 1;
+        self.line_start_pos = self.pos();
     }
     fn scan_quoted_char(&mut self) {
         match self.read.cur {
@@ -182,20 +220,20 @@ impl<'a> Lexer<'a> {
         self.scan_quoted_char();
         if self.read.cur == b'\'' {
             self.read.advance();
-            Literal(())
+            Token::Literal(())
         } else {
-            Lifetime(())
+            Token::Lifetime(())
         }
     }
     fn scan_doublequote(&mut self) -> Token {
         while self.read.cur != b'"' {
             if self.read.at_eof() { return Token::Eof; }
-            self.read_quoted_char();
+            self.scan_quoted_char();
         }
-        Literal(())
+        Token::Literal(())
     }
     fn scan_slashstar_comment(&mut self) {
-        // XXX
+        panic!()
     }
     fn skip_to_nl(&mut self) {
         while self.read.next() != b'\n' && !self.read.at_eof() {}
@@ -222,18 +260,18 @@ impl<'a> Lexer<'a> {
         self.read.rewind();
         let c = self.read.next_utf8();
         if Pattern_White_Space(c) {
-            if c == b'\n' { self.bump_lineno(); }
+            if c == (b'\n' as u32) { self.bump_lineno(); }
             return None;
         }
         // assume it's an ident
-        return self.read_ident();
+        return Some(self.scan_ident());
     }
     pub fn next(&mut self) -> Token {
         loop {
-            return match self.read.next() {
+            let r: Token = match self.read.next() {
                 b'/' => match self.read.cur {
                     b'/' => { self.skip_to_nl(); continue },
-                    b'*' => { self.read_slashstar_comment(); continue },
+                    b'*' => { self.scan_slashstar_comment(); continue },
                     _ => { Token::Other /* div */ },
                 },
                 b'\0' => Token::Eof,
@@ -244,45 +282,59 @@ impl<'a> Lexer<'a> {
                     self.read.advance();
                     Token::DotDotDot
                 },
-                b'#' if self.read.pos == 1 => self.skip_to_nl(),
+                b'#' if self.read.pos == 1 => {
+                    self.skip_to_nl();
+                    continue
+                },
                 b'#' => Token::Pound,
                 b'!' => Token::Not,
                 b'<' => Token::Lt,
                 b'>' => Token::Gt,
                 b',' => Token::Comma,
                 b':' => match self.read.cur {
-                    ':' => { self.read.advance(); Token::ModSep },
+                    b':' => { self.read.advance(); Token::ModSep },
                     _ => { Token::Colon },
                 },
                 b';' => Token::Semi,
                 b'?' => Token::Question,
                 b'$' => Token::Dollar,
                 b'_' => Token::Underscore,
+                b'=' => Token::Eq,
+                b'-' => match self.read.cur {
+                    b'>' => { self.read.advance(); Token::RArrow },
+                    _ => { Token::Other },
+                },
                 b'[' =>  Token::OpenDelim(DelimToken::Bracket),
                 b']' => Token::CloseDelim(DelimToken::Bracket),
                 b'(' =>  Token::OpenDelim(DelimToken::Paren),
                 b')' => Token::CloseDelim(DelimToken::Paren),
                 b'{' =>  Token::OpenDelim(DelimToken::Brace),
                 b'}' => Token::CloseDelim(DelimToken::Brace),
-                b'\'' => self.read_singlequote(),
-                b'"' => self.read_doublequote(),
+                b'\'' => self.scan_singlequote(),
+                b'"' => self.scan_doublequote(),
                 b'|' => Token::BinOp(BinOp::Or),
+                b'&' => Token::BinOp(BinOp::And),
+                b'*' => Token::BinOp(BinOp::Star),
+                b'+' => Token::BinOp(BinOp::Plus),
                 b' ' | b'\t' | b'\r' => continue,
                 b'\n' => { self.bump_lineno(); continue },
-                b'a' ... b'z' | b'A' ... b'Z' | b'_' => self.read_ident(),
+                b'a' ... b'z' | b'A' ... b'Z' | b'_' => self.scan_ident(),
                 b'\x00' ... b'\x7f' => Token::Other,
                 _ => {
-                    if let Some(tok) = self.next_unicode(c) { tok } else { continue }
+                    if let Some(tok) = self.next_unicode() { tok } else { continue }
                 },
             };
+            return r;
         }
-
     }
     pub fn pos(&self) -> usize {
         self.read.pos_of_cur()
     }
-    pub fn lineno(&self) -> usize {
+    pub fn line(&self) -> usize {
         self.lineno
+    }
+    pub fn col(&self) -> usize {
+        1 + self.pos() - self.line_start_pos
     }
     pub fn set_pos(&mut self, pos: usize) {
         self.lineno = 1000000;

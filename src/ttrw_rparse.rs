@@ -1,28 +1,33 @@
-use {GetMode, SpanToken, StorageCell, rparse};
-use rparse::{Lexer, token};
+use {GetMode, SpanToken, Storage, rparse};
+use rparse::{Lexer, token, Token, DelimToken, Ident};
 use std::cell::UnsafeCell;
+
 pub type OutIdent = String;
+pub fn out_ident_from_ident(ident: &Ident) -> OutIdent { ident.name.as_str().to_owned() }
 
 pub struct Splice {
     pos: usize,
     len: usize,
-    new: String,
+    new: Vec<u8>,
 }
 
+#[derive(Copy, Clone)]
 pub struct Mark {
     pos: usize,
 }
+#[derive(Copy, Clone)]
 pub struct Span {
-    lineno: usize,
-    pos: usize,
+    pub pos: usize,
+    pub line: usize,
+    pub col: usize,
 }
 pub fn dummy_span() -> Span {
-    Span { lineno: 0, pos: 0 }
+    Span { pos: !0, line: 0, col: 0 }
 }
 pub struct TTWriter<'x, 'a: 'x> {
     tr: &'x mut TTReader<'a>,
     pos: usize,
-    out: String,
+    out: Vec<u8>,
 }
 impl<'x, 'a: 'x> TTWriter<'x, 'a> {
     pub fn write(&mut self, tok: Token) {
@@ -37,13 +42,13 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
             token::CloseDelim(DelimToken::Paren) => ")",
              token::OpenDelim(DelimToken::Brace) => "{",
             token::CloseDelim(DelimToken::Brace) => "}",
-            token::Ident(ident) => ident.as_str().unwrap(),
+            token::Ident(ident) => ident.name.as_str(),
             _ => panic!("missing case"),
         };
-        self.out.push_str(s);
+        self.out.extend_from_slice(s.as_bytes());
     }
     pub fn write_ident(&mut self, ident_str: &str) {
-        self.out.push_str(ident_str);
+        self.out.extend_from_slice(ident_str.as_bytes());
     }
     pub fn finish(mut self) {
         self.tr.splices.push(Splice {
@@ -61,7 +66,7 @@ pub struct TTReader<'a> {
     splices: Vec<Splice>,
 }
 impl<'a> TTReader<'a> {
-    pub fn new(data: &'a [u8], span_storage: &'a UnsafeCell<Span>) -> Self {
+    pub fn new(data: &'a [u8], storage: &'a UnsafeCell<Storage>) -> Self {
         TTReader {
             data: data,
             lexer: Lexer::new(data),
@@ -70,7 +75,11 @@ impl<'a> TTReader<'a> {
         }
     }
     pub fn next(&mut self) -> Option<SpanToken<'a>> {
-        let span = Span { lineno: self.lexer.lineno(), pos: self.lexer.pos() };
+        let span = Span {
+            pos: self.lexer.pos(),
+            line: self.lexer.line(),
+            col: self.lexer.col(),
+        };
         match self.lexer.next() {
             token::Eof => None,
             tok @ _ => {
@@ -78,8 +87,8 @@ impl<'a> TTReader<'a> {
                     let ptr = self.storage.get();
                     (*ptr).span = span;
                     (*ptr).token = tok;
-                    SpanToken { span: &(*ptr).span, token: &(*ptr).token }
-                };
+                    Some(SpanToken { span: &(*ptr).span, token: &(*ptr).token })
+                }
             }
         }
 
@@ -96,14 +105,14 @@ impl<'a> TTReader<'a> {
         self.splices.push(Splice {
             pos: start.pos,
             len: end.pos - start.pos,
-            new: String::new(),
+            new: Vec::new(),
         });
     }
     pub fn copy_from_mark_range(&mut self, start: Mark, end: Mark, _: GetMode) {
         self.splices.push(Splice {
             pos: self.lexer.pos(),
             len: 0,
-            new: self.data[start.cur_offset..end.cur_offset].to_owned(),
+            new: self.data[start.pos..end.pos].to_owned(),
         });
     }
     pub fn mutate_ident<F>(&mut self, mark: Mark, f: F) where F: FnOnce(Ident) -> OutIdent {
@@ -117,14 +126,14 @@ impl<'a> TTReader<'a> {
         self.splices.push(Splice {
             pos: mark.pos,
             len: lexer_copy.pos() - mark.pos,
-            new: new,
+            new: new.into_bytes(),
         });
     }
     pub fn writer<'x>(&'x mut self) -> TTWriter<'x, 'a> {
         TTWriter {
             tr: self,
             pos: self.lexer.pos(),
-            out: String::new(),
+            out: Vec::new(),
         }
     }
 }
