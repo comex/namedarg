@@ -12,7 +12,7 @@ pub struct Splice {
     new: Vec<u8>,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Mark {
     pos: usize,
 }

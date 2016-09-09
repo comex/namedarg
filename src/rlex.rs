@@ -236,6 +236,7 @@ impl<'a> Lexer<'a> {
             if self.read.at_eof() { return Token::Eof; }
             self.scan_quoted_char();
         }
+        self.read.advance();
         Token::Literal(())
     }
     fn scan_slashstar_comment(&mut self) {
@@ -278,6 +279,7 @@ impl<'a> Lexer<'a> {
     }
     #[inline]
     pub fn next(&mut self) -> Token {
+        //println!(">> cur={:?} pos={}, line={}", self.read.cur, self.pos(), self.line());
         match self.read.next() {
             b'/' => match self.read.cur {
                 b'/' => { self.skip_to_nl(); Token::White },
@@ -338,6 +340,16 @@ impl<'a> Lexer<'a> {
             b'a' ... b'z' | b'A' ... b'Z' | b'_' => {
                 let pos = self.read.pos_of_cur() - 1;
                 self.scan_ident(pos)
+            },
+            b'0' ... b'9' => {
+                loop {
+                    match self.read.cur {
+                        b'0' ... b'9' | b'a' ... b'z' | b'A' ... b'Z' =>
+                            self.read.advance(),
+                        _ => break
+                    }
+                }
+                Token::Literal(())
             },
             b'\x00' ... b'\x7f' => Token::Other,
             _ => return self.next_unicode(),

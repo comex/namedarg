@@ -23,6 +23,11 @@ if_rlex! {
         let cx = DummyExtCtxt::new();
         let storage = UnsafeCell::new(Storage::new());
         let mut tr = TTReader::new(&source, &storage);
+        if false {
+            while let Some(st) = tr.next() {
+                println!("{}:{} {:?}", st.span.line, st.span.col, st.token);
+            }
+        }
         let time_1 = Instant::now();
         {
             let mut ctx = Context { cx: &cx, use_valid_idents: true };

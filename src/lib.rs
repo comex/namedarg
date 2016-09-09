@@ -56,8 +56,8 @@ impl Storage {
 }
 
 pub struct SpanToken<'a> {
-    span: &'a Span,
-    token: &'a Token,
+    pub span: &'a Span,
+    pub token: &'a Token,
 }
 
 enum Judge { Expected, Ignore, Unexpected, }
@@ -619,7 +619,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
         }
         if_println_spam! {
             println!("stack={} state={:?}", stack.len(sp), state);
-            println!("parserdepth={} delim_depth={} ifp={} tok={:?}", tr.stack.len(), delim_depth, in_func_parens, st.token);
+            println!("delim_depth={} ifp={} tok={:?}", delim_depth, in_func_parens, st.token);
             ctx.cx.span_warn(*st.span, "hi");
         }
         match replace(&mut state, State::Dummy) {
@@ -631,7 +631,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         // XXX trait, attr
                         let name = ident.name;
                         if_rlex! {
-                            let big = false;
+                            let big = name == keywords::Other.name();
                         }
                         if_not_rlex! {
                             let big = name.0 >= keywords::Default.name().0;
@@ -743,6 +743,9 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                     },
                 }
                 st = st_or_return!();
+                if_println_spam! {
+                    continue_same!(State::Null { expecting_operator: expecting_operator, after_semi_or_brace: after_semi_or_brace });
+                }
             },
             State::GotIdent { ident } => {
                 match st.token {
@@ -804,11 +807,12 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                 match st.token {
                     &token::Ident(ref ident) => {
                         let mark = tr.mark_last();
+                        let oident = tr.last_out_ident(st.span, &ident);
                         let st2 = st_or_return!();
                         if let &token::Colon = st2.token {
                             let to = tr.mark_next();
                             tr.delete_mark_range(mark, to);
-                            pushx_manual!(StateVariant::CallArg, Some(tr.last_out_ident(st2.span, &ident)));
+                            pushx_manual!(StateVariant::CallArg, Some::<OutIdent>(oident));
                             pushx!(VariantData::CallArgStart);
                             in_func_parens = true;
                             continue_next!(State::Null { expecting_operator: false, after_semi_or_brace: false });
@@ -859,7 +863,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         continue_next!(State::CallArgStart);
                     },
                     _ => {
-                        pushx_manual!(StateVariant::CallArg, None::<Ident>);
+                        pushx_manual!(StateVariant::CallArg, None::<OutIdent>);
                         pushx!(VariantData::CallArgStart);
                         in_func_parens = true;
                         continue_same!(State::Null { expecting_operator: false, after_semi_or_brace: false });
