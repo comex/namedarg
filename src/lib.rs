@@ -81,7 +81,7 @@ if_not_rlex! {
     use syntax::util::small_vector::SmallVector;
 
     mod ttrw_libsyntax;
-    pub use ttrw_libsyntax::{TTWriter, TTReader, Mark, OutIdent, dummy_span, out_ident_from_ident};
+    pub use ttrw_libsyntax::{TTWriter, TTReader, Mark, OutIdent, dummy_span, out_ident_to_string};
 
     fn judge_other_token(tok: &Token) -> Judge {
         match tok {
@@ -101,7 +101,7 @@ if_not_rlex! {
             &token::Ident(_) | &token::OpenDelim(_) | &token::CloseDelim(_) |
             &token::Comma | &token::Colon | &token::Lt |
             &token::Semi | &token::Question | &token::Literal(..) | &token::Underscore |
-            &token::Pound | &token::Lifetime(..) => unreachable!(),
+            &token::Pound | &token::Lifetime(..) => unreachable!("jot"),
         }
     }
 }
@@ -110,11 +110,11 @@ if_rlex! {
     pub use rlex::{Ident, BinOp, DelimToken, Token, token, keywords};
 
     mod ttrw_rlex;
-    pub use ttrw_rlex::{TTWriter, TTReader, Mark, Span, OutIdent, dummy_span, out_ident_from_ident};
+    pub use ttrw_rlex::{TTWriter, TTReader, Mark, Span, OutIdent, dummy_span, out_ident_to_string};
 
     fn judge_other_token(tok: &Token) -> Judge {
         match tok {
-            &token::Dummy => Judge::Unexpected,
+            &token::Dummy | &token::White => Judge::Unexpected,
             &token::Gt | &token::Not |
             &token::BinOp(_) | &token::DotDot | &token::DotDotDot |
             &token::ModSep | &token::Dollar | &token::Eq | &token::RArrow |
@@ -125,14 +125,14 @@ if_rlex! {
             &token::Ident(_) | &token::OpenDelim(_) | &token::CloseDelim(_) |
             &token::Comma | &token::Colon | &token::Lt |
             &token::Semi | &token::Question | &token::Literal(..) | &token::Underscore |
-            &token::Pound | &token::Lifetime(..) => unreachable!(),
+            &token::Pound | &token::Lifetime(..) => unreachable!("jot"),
         }
     }
 }
 
-fn mutate_name<'a, I>(fn_name_ident: &Ident, arg_names: I, ctx: &Context) -> OutIdent
-    where I: Iterator<Item=Option<&'a Ident>> {
-    let mut name: String = (*fn_name_ident.name.as_str()).to_owned();
+fn mutate_name<'a, I>(fn_name_ident: &OutIdent, arg_names: I, ctx: &Context) -> OutIdent
+    where I: Iterator<Item=Option<&'a OutIdent>> {
+    let mut name: String = out_ident_to_string(fn_name_ident);
     if ctx.use_valid_idents {
         name.push_str("__lbl");
     } else {
@@ -143,13 +143,13 @@ fn mutate_name<'a, I>(fn_name_ident: &Ident, arg_names: I, ctx: &Context) -> Out
         if ctx.use_valid_idents {
             if let Some(arg_name) = arg_name {
                 name.push_str("__");
-                name.push_str(&*arg_name.name.as_str());
+                name.push_str(arg_name);
             } else {
                 name.push_str("_X");
             }
         } else {
             if let Some(arg_name) = arg_name {
-                name.push_str(&*arg_name.name.as_str());
+                name.push_str(arg_name);
             }
             name.push(':');
         }
@@ -157,7 +157,7 @@ fn mutate_name<'a, I>(fn_name_ident: &Ident, arg_names: I, ctx: &Context) -> Out
     }
     if !any {
         // if all arguments defaulted, use an untransformed ident
-        return out_ident_from_ident(fn_name_ident);
+        return fn_name_ident.clone();
     }
     if !ctx.use_valid_idents {
         name.push('}');
@@ -272,7 +272,7 @@ macro_rules! derive_variant_data {
     { pub enum $enum_name:ident { $($args:tt)* } } => {
         #[allow(non_snake_case)]
         mod VariantData {
-            use super::{State, Mark, StateVariant, XAndCommon, DeclStuff, DeclArg, Ident, VariantData, StackPtr, DTMode, OutIdent};
+            use super::{State, Mark, StateVariant, XAndCommon, DeclStuff, DeclArg, VariantData, StackPtr, DTMode, OutIdent};
             derive_variant_data_inner!($enum_name ; $($args)*);
         }
         #[cfg_attr(feature = "derive_debug", derive(Debug))]
@@ -291,7 +291,7 @@ pub enum State {
     GotFnName { name: Mark, generic_start: Option<Mark> },
     CallArgStart,
     DeclArgStart { pending_default: bool },
-    DeclEnd { first_arg: StackPtr, decl: &'static DeclStuff, davs: &'static [XAndCommon<DeclArg>], old_name: Ident, new_full_name: OutIdent, args_end: Mark, decl_end: Option<Mark> },
+    DeclEnd { first_arg: StackPtr, decl: &'static DeclStuff, davs: &'static [XAndCommon<DeclArg>], old_name: OutIdent, new_full_name: OutIdent, args_end: Mark, decl_end: Option<Mark> },
     SeekingSemiOrOpenBrace,
     DefinitelyType { angle_depth: u32, mode: DTMode, start_of_type: bool }, // pops on closing >, skipping it
     LambdaEnd,
@@ -317,7 +317,7 @@ pub enum StateVariant {
     GotFn,
     GotFnName,
     CallStart, // name: Mark
-    CallArg, // Option<Ident>
+    CallArg, // Option<OutIdent>
     CallArgStart,
     DeclStart, // DeclStuff
     DeclArg, // DeclArg
@@ -409,7 +409,7 @@ impl StackPtr {
                 println!("pushing {} u64s", count);
             }
             let ptr = &mut *(self.0 as *mut T);
-            *ptr = t;
+            ptr::write(ptr, t);
             self.0 = self.0.offset(count as isize);
             ptr
         }
@@ -426,7 +426,7 @@ pub struct DeclStuff {
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
 #[derive(Clone, Default)]
 pub struct DeclArg {
-    name: Option<Ident>,
+    name: Option<OutIdent>,
     ty_start: Option<Mark>,
     ty_end: Option<Mark>,
     ty_ends_with_selfval: bool,
@@ -465,7 +465,7 @@ impl<X> XAndCommon<X> {
     }
 }
 
-fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &Ident, new_full_name: &OutIdent, cur_in_trait_or_impl: Option<&'static VariantData::InTraitOrImpl>, ctx: &Context) {
+fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &OutIdent, new_full_name: &OutIdent, cur_in_trait_or_impl: Option<&'static VariantData::InTraitOrImpl>, ctx: &Context) {
     let mut tw: TTWriter = tr.writer();
     // #[allow(dead_code)]
     tw.write(token::Pound);
@@ -808,12 +808,12 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         if let &token::Colon = st2.token {
                             let to = tr.mark_next();
                             tr.delete_mark_range(mark, to);
-                            pushx_manual!(StateVariant::CallArg, Some(*ident));
+                            pushx_manual!(StateVariant::CallArg, Some(tr.last_out_ident(st2.span, &ident)));
                             pushx!(VariantData::CallArgStart);
                             in_func_parens = true;
                             continue_next!(State::Null { expecting_operator: false, after_semi_or_brace: false });
                         } else {
-                            pushx_manual!(StateVariant::CallArg, None::<Ident>);
+                            pushx_manual!(StateVariant::CallArg, None::<OutIdent>);
                             pushx!(VariantData::CallArgStart);
                             in_func_parens = true;
                             st = st2;
@@ -835,7 +835,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                                     break;
                                 },
                                 StateVariant::CallArg => {
-                                    let ident = *sp.pop_ref::<Option<Ident>>();
+                                    let ident = sp.pop_val::<Option<OutIdent>>();
                                     if ident.is_some() { any = true; }
                                     num_args += 1;
                                     first_arg = sp;
@@ -847,7 +847,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         }
                         if any {
                             tr.mutate_ident(orig_name, |ident| {
-                                let cavs: &'static [XAndCommon<Option<Ident>>] = unsafe { slice::from_raw_parts(transmute(first_arg.ptr()), num_args) };
+                                let cavs: &'static [XAndCommon<Option<OutIdent>>] = unsafe { slice::from_raw_parts(transmute(first_arg.ptr()), num_args) };
                                 let arg_names = cavs.iter().map(|cav| cav.x.as_ref());
                                 mutate_name(&ident, arg_names, ctx)
                             });
@@ -883,49 +883,46 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                                             ident.name == keywords::Mut.name() ||
                                             ident.name == keywords::Box.name() => (),
                     &Token::Underscore | &token::Ident(_) => {
-                        // TODO other patterns
+                        let ident1: Option<OutIdent> = match st.token {
+                            &token::Ident(ref ident) => Some(tr.last_out_ident(st.span, ident)),
+                            &token::Underscore => None,
+                            _ => unreachable!(),
+                        };
                         let to_delete = tr.mark_last();
                         let st2 = st_or_return!();
                         match st2.token {
-                            &token::Ident(ident2) => {
+                            &token::Ident(ref ident2) => {
                                 let to = tr.mark_last();
                                 tr.delete_mark_range(to_delete, to);
-                                match st.token {
-                                    &token::Ident(ident1) => {
-                                        pushx_manual!(StateVariant::DeclArg, DeclArg {
-                                            name: Some(ident1), is_default: pending_default, ..DeclArg::default()
-                                        });
-                                        pushx!(VariantData::DeclArgStart { pending_default: false });
-                                    },
-                                    &Token::Underscore => {
-                                        pushx_manual!(StateVariant::DeclArg, DeclArg {
-                                            name: Some(ident2), is_default: pending_default, ..DeclArg::default()
-                                        });
-                                        pushx!(VariantData::DeclArgStart { pending_default: false });
-                                        let st3 = st_or_return!();
-                                        if let &Token::Colon = st3.token {} else {
-                                            ctx.cx.span_err(*st3.span, "_ should be followed by an ident pattern");
+                                if let Some(ident1) = ident1 {
+                                    pushx_manual!(StateVariant::DeclArg, DeclArg {
+                                        name: Some(ident1), is_default: pending_default, ..DeclArg::default()
+                                    });
+                                    pushx!(VariantData::DeclArgStart { pending_default: false });
+                                } else {
+                                    let oident2 = tr.last_out_ident(st2.span, ident2);
+                                    pushx_manual!(StateVariant::DeclArg, DeclArg {
+                                        name: Some(oident2), is_default: pending_default, ..DeclArg::default()
+                                    });
+                                    pushx!(VariantData::DeclArgStart { pending_default: false });
+                                    let st3 = st_or_return!();
+                                    if let &Token::Colon = st3.token {} else {
+                                        ctx.cx.span_err(*st3.span, "_ should be followed by an ident pattern");
 
-                                        }
-                                    },
-                                    _ => unreachable!(),
-                                };
+                                    }
+                                }
                             },
                             &token::BinOp(token::And) | &token::BinOp(token::Star) | &token::Underscore => {
                                 // reference/pointer/dontcare patterns
-                                match st.token {
-                                    &token::Ident(ident1) => {
-                                        let to = tr.mark_last();
-                                        tr.delete_mark_range(to_delete, to);
-                                        pushx_manual!(StateVariant::DeclArg, DeclArg {
-                                            name: Some(ident1), is_default: pending_default, ..DeclArg::default()
-                                        });
-                                        pushx!(VariantData::DeclArgStart { pending_default: false });
-                                    },
-                                    &Token::Underscore => {
-                                        ctx.cx.span_err(*st.span, "_ should be followed by an ident pattern");
-                                    },
-                                    _ => unreachable!(),
+                                if let Some(ident1) = ident1 {
+                                    let to = tr.mark_last();
+                                    tr.delete_mark_range(to_delete, to);
+                                    pushx_manual!(StateVariant::DeclArg, DeclArg {
+                                        name: Some(ident1), is_default: pending_default, ..DeclArg::default()
+                                    });
+                                    pushx!(VariantData::DeclArgStart { pending_default: false });
+                                } else {
+                                    ctx.cx.span_err(*st.span, "_ should be followed by an ident pattern");
                                 }
                             },
                             _ => {
@@ -968,7 +965,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                             }
                         }
                         if any {
-                            let mut old_new: Option<(Ident, OutIdent)> = None;
+                            let mut old_new: Option<(OutIdent, OutIdent)> = None;
                             let davs: &'static [XAndCommon<DeclArg>] = unsafe { slice::from_raw_parts(transmute(first_arg.ptr()), num_args) };
                             tr.mutate_ident(decl.name, |orig_ident| {
                                 let new_full_name = mutate_name(&orig_ident, davs.iter().map(|dav| dav.x.name.as_ref()), ctx);

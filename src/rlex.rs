@@ -176,6 +176,7 @@ pub enum Token {
     Lifetime(()),
     BinOp(BinOp),
     Dummy,
+    White,
     Other,
 }
 pub mod token {
@@ -264,86 +265,93 @@ impl<'a> Lexer<'a> {
             Token::Ident(Ident::from_bytes(&self.read.data[start..end]))
         }
     }
-    fn next_unicode(&mut self) -> Option<Token> {
+    fn next_unicode(&mut self) -> Token {
         self.read.rewind();
         let pos = self.read.pos_of_cur();
         let c = self.read.next_utf8();
         if Pattern_White_Space(c) {
             if c == (b'\n' as u32) { self.bump_lineno(); }
-            return None;
+            return Token::White;
         }
         // assume it's an ident
-        return Some(self.scan_ident(pos));
+        return self.scan_ident(pos);
     }
+    #[inline]
     pub fn next(&mut self) -> Token {
-        loop {
-            let r: Token = match self.read.next() {
-                b'/' => match self.read.cur {
-                    b'/' => { self.skip_to_nl(); continue },
-                    b'*' => { self.scan_slashstar_comment(); continue },
-                    _ => { Token::Other /* div */ },
-                },
-                b'\0' => Token::Eof,
-                b'.' => {
-                    if self.read.cur != b'.' { return Token::Other; }
-                    self.read.advance();
-                    if self.read.cur != b'.' { return Token::DotDot; }
-                    self.read.advance();
-                    Token::DotDotDot
-                },
-                b'#' if self.read.pos == 1 => {
-                    self.skip_to_nl();
-                    continue
-                },
-                b'#' => Token::Pound,
-                b'!' => Token::Not,
-                b'<' => Token::Lt,
-                b'>' => Token::Gt,
-                b',' => Token::Comma,
-                b':' => match self.read.cur {
-                    b':' => { self.read.advance(); Token::ModSep },
-                    _ => { Token::Colon },
-                },
-                b';' => Token::Semi,
-                b'?' => Token::Question,
-                b'$' => Token::Dollar,
-                b'=' => Token::Eq,
-                b'-' => match self.read.cur {
-                    b'>' => { self.read.advance(); Token::RArrow },
-                    _ => { Token::Other },
-                },
-                b'[' =>  Token::OpenDelim(DelimToken::Bracket),
-                b']' => Token::CloseDelim(DelimToken::Bracket),
-                b'(' =>  Token::OpenDelim(DelimToken::Paren),
-                b')' => Token::CloseDelim(DelimToken::Paren),
-                b'{' =>  Token::OpenDelim(DelimToken::Brace),
-                b'}' => Token::CloseDelim(DelimToken::Brace),
-                b'\'' => self.scan_singlequote(),
-                b'"' => self.scan_doublequote(),
-                b'|' => Token::BinOp(BinOp::Or),
-                b'&' => Token::BinOp(BinOp::And),
-                b'*' => Token::BinOp(BinOp::Star),
-                b'+' => Token::BinOp(BinOp::Plus),
-                b' ' | b'\t' | b'\r' => continue,
-                b'\n' => { self.bump_lineno(); continue },
-                b'a' ... b'z' | b'A' ... b'Z' | b'_' => {
-                    let pos = self.read.pos_of_cur() - 1;
-                    self.scan_ident(pos)
-                },
-                b'\x00' ... b'\x7f' => Token::Other,
-                _ => {
-                    if let Some(tok) = self.next_unicode() { tok } else { continue }
-                },
-            };
-            return r;
+        match self.read.next() {
+            b'/' => match self.read.cur {
+                b'/' => { self.skip_to_nl(); Token::White },
+                b'*' => { self.scan_slashstar_comment(); Token::White },
+                _ => { Token::Other /* div */ },
+            },
+            b'\0' => Token::Eof,
+            b'.' => {
+                if self.read.cur != b'.' { return Token::Other; }
+                self.read.advance();
+                if self.read.cur != b'.' { return Token::DotDot; }
+                self.read.advance();
+                Token::DotDotDot
+            },
+            b'#' if self.read.pos == 1 => {
+                self.skip_to_nl();
+                Token::White
+            },
+            b'#' => Token::Pound,
+            b'!' => Token::Not,
+            b'<' => Token::Lt,
+            b'>' => Token::Gt,
+            b',' => Token::Comma,
+            b':' => match self.read.cur {
+                b':' => { self.read.advance(); Token::ModSep },
+                _ => { Token::Colon },
+            },
+            b';' => Token::Semi,
+            b'?' => Token::Question,
+            b'$' => Token::Dollar,
+            b'=' => Token::Eq,
+            b'-' => match self.read.cur {
+                b'>' => { self.read.advance(); Token::RArrow },
+                _ => { Token::Other },
+            },
+            b'[' =>  Token::OpenDelim(DelimToken::Bracket),
+            b']' => Token::CloseDelim(DelimToken::Bracket),
+            b'(' =>  Token::OpenDelim(DelimToken::Paren),
+            b')' => Token::CloseDelim(DelimToken::Paren),
+            b'{' =>  Token::OpenDelim(DelimToken::Brace),
+            b'}' => Token::CloseDelim(DelimToken::Brace),
+            b'\'' => self.scan_singlequote(),
+            b'"' => self.scan_doublequote(),
+            b'|' => Token::BinOp(BinOp::Or),
+            b'&' => Token::BinOp(BinOp::And),
+            b'*' => Token::BinOp(BinOp::Star),
+            b'+' => Token::BinOp(BinOp::Plus),
+            b' ' | b'\t' | b'\r' => {
+                loop {
+                    match self.read.cur {
+                        b' ' | b'\t' | b'\r' => self.read.advance(),
+                        _ => break
+                    }
+                }
+                Token::White
+            },
+            b'\n' => { self.bump_lineno(); Token::White },
+            b'a' ... b'z' | b'A' ... b'Z' | b'_' => {
+                let pos = self.read.pos_of_cur() - 1;
+                self.scan_ident(pos)
+            },
+            b'\x00' ... b'\x7f' => Token::Other,
+            _ => return self.next_unicode(),
         }
     }
+    #[inline]
     pub fn pos(&self) -> usize {
         self.read.pos_of_cur()
     }
+    #[inline]
     pub fn line(&self) -> usize {
         self.lineno
     }
+    #[inline]
     pub fn col(&self) -> usize {
         1 + self.pos() - self.line_start_pos
     }

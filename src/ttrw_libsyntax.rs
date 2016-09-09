@@ -10,7 +10,9 @@ use std::rc::Rc;
 use std::cell::UnsafeCell;
 
 pub type OutIdent = Ident;
-pub fn out_ident_from_ident(ident: &Ident) -> OutIdent { *ident }
+pub fn out_ident_to_string(ident: &OutIdent) -> String {
+    (*ident.name.as_str()).to_owned();
+}
 
 pub fn dummy_span() -> Span {
     syntax_pos::COMMAND_LINE_SP
@@ -256,6 +258,10 @@ impl<'a> TTReader<'a> {
             self.cur_offset = vec.len();
             self.output = Some(vec);
         }
+    }
+    #[inline(always)]
+    pub fn last_out_ident(&self, _: &Span, ident: &Ident) -> OutIdent {
+        *ident
     }
     pub fn mutate_ident<F>(&mut self, mark: Mark, f: F) where F: FnOnce(Ident) -> OutIdent {
         let name = self.mutate_mark(mark);

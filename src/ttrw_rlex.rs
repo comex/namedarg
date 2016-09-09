@@ -1,9 +1,10 @@
 use {GetMode, SpanToken, Storage};
 use rlex::{Lexer, token, Token, DelimToken, Ident};
 use std::cell::UnsafeCell;
+use std::str;
 
 pub type OutIdent = String;
-pub fn out_ident_from_ident(ident: &Ident) -> OutIdent { ident.name.as_str().to_owned() }
+pub fn out_ident_to_string(ident: &OutIdent) -> String { ident.clone() }
 
 pub struct Splice {
     pos: usize,
@@ -36,6 +37,9 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
             token::Underscore => "_",
             token::Comma => ",",
             token::Colon => ":",
+            token::ModSep => "::",
+            token::Lt => "<",
+            token::Gt => ">",
              token::OpenDelim(DelimToken::Bracket) => "[",
             token::CloseDelim(DelimToken::Bracket) => "]",
              token::OpenDelim(DelimToken::Paren) => "(",
@@ -43,9 +47,11 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
              token::OpenDelim(DelimToken::Brace) => "{",
             token::CloseDelim(DelimToken::Brace) => "}",
             token::Ident(ident) => ident.name.as_str(),
-            _ => panic!("missing case"),
+            _ => panic!("missing case {:?}", tok),
         };
+        self.out.push(b' ');
         self.out.extend_from_slice(s.as_bytes());
+        self.out.push(b' ');
     }
     pub fn write_ident_str(&mut self, ident_str: &str) {
         self.out.extend_from_slice(ident_str.as_bytes());
@@ -81,20 +87,23 @@ impl<'a> TTReader<'a> {
         }
     }
     pub fn next(&mut self) -> Option<SpanToken<'a>> {
-        let span = Span {
-            pos: self.lexer.pos(),
-            line: self.lexer.line(),
-            col: self.lexer.col(),
-        };
-        match self.lexer.next() {
-            token::Eof => None,
-            tok @ _ => {
-                unsafe {
-                    let ptr = self.storage.get();
-                    (*ptr).span = span;
-                    (*ptr).token = tok;
-                    Some(SpanToken { span: &(*ptr).span, token: &(*ptr).token })
-                }
+        loop {
+            let span = Span {
+                pos: self.lexer.pos(),
+                line: self.lexer.line(),
+                col: self.lexer.col(),
+            };
+            match self.lexer.next() {
+                token::Eof => return None,
+                token::White => continue,
+                tok @ _ => {
+                    unsafe {
+                        let ptr = self.storage.get();
+                        (*ptr).span = span;
+                        (*ptr).token = tok;
+                        return Some(SpanToken { span: &(*ptr).span, token: &(*ptr).token });
+                    }
+                },
             }
         }
 
@@ -115,11 +124,11 @@ impl<'a> TTReader<'a> {
             new: Vec::new(),
         });
     }
-    pub fn mutate_ident<F>(&mut self, mark: Mark, f: F) where F: FnOnce(Ident) -> OutIdent {
+    pub fn mutate_ident<F>(&mut self, mark: Mark, f: F) where F: FnOnce(OutIdent) -> OutIdent {
         let mut lexer_copy = self.lexer;
         lexer_copy.set_pos(mark.pos);
-        let ident = match lexer_copy.next() {
-            token::Ident(ident) => ident,
+        let ident: OutIdent = match lexer_copy.next() {
+            token::Ident(_) => str::from_utf8(&self.data[mark.pos..lexer_copy.pos()]).unwrap().to_owned(),
             _ => unreachable!(),
         };
         let new = f(ident);
@@ -129,6 +138,9 @@ impl<'a> TTReader<'a> {
             len: lexer_copy.pos() - mark.pos,
             new: new.into_bytes(),
         });
+    }
+    pub fn last_out_ident(&self, span: &Span, _: &Ident) -> OutIdent {
+        str::from_utf8(&self.data[span.pos..self.lexer.pos()]).unwrap().to_owned()
     }
     pub fn writer<'x>(&'x mut self) -> TTWriter<'x, 'a> {
         let pos = self.lexer.pos();
@@ -151,7 +163,9 @@ impl<'a> TTReader<'a> {
             for splice in &self.splices {
                 assert!(pos <= splice.pos);
                 out.extend_from_slice(&self.data[pos..splice.pos]);
+                //out.push(b'<');
                 out.extend_from_slice(&splice.new);
+                //out.push(b'>');
                 pos = splice.pos + splice.len;
             }
             out.extend_from_slice(&self.data[pos..]);
