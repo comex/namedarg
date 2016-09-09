@@ -8,6 +8,7 @@ use syntax_pos::Span;
 use std::mem::replace;
 use std::rc::Rc;
 use std::cell::UnsafeCell;
+use std::mem::transmute;
 
 pub fn dummy_span() -> Span {
     syntax_pos::COMMAND_LINE_SP
@@ -98,7 +99,8 @@ impl Mark {
     }
 }
 */
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "derive_debug", derive(Debug))]
 pub struct InIdent {
     mark: Mark,
     ident: Ident,
@@ -270,7 +272,7 @@ impl<'a> TTReader<'a> {
     pub fn mutate_ident(&mut self, ii: InIdent, new: String) {
         let name = self.mutate_mark(ii.mark);
         if let TokenTree::Token(_, token::Ident(ref mut ident)) = *name {
-            *ident = Ident::with_empty_ctxt(token::intern(new));
+            *ident = Ident::with_empty_ctxt(token::intern(&new));
         } else {
             unreachable!()
         }

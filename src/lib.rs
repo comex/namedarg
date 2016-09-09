@@ -132,6 +132,7 @@ if_rlex! {
 
 fn mutate_name(fn_name: &str, arg_names: &mut Iterator<Item=Option<&str>>, ctx: &Context) -> String {
     let mut name: String = fn_name.to_owned();
+    let olen = name.len();
     if ctx.use_valid_idents {
         name.push_str("__lbl");
     } else {
@@ -156,6 +157,7 @@ fn mutate_name(fn_name: &str, arg_names: &mut Iterator<Item=Option<&str>>, ctx: 
     }
     if !any {
         // if all arguments defaulted, use an untransformed ident
+        name.truncate(olen);
         return name;
     }
     if !ctx.use_valid_idents {
@@ -414,7 +416,7 @@ pub struct DeclArg {
     name: Option<InIdent>,
     ty_start: Option<Mark>,
     ty_end: Option<Mark>,
-    ty_ends_with_selfval: bool,
+    ty_ends_with_selfval: bool, // only used with rlex
     is_default: bool,
 }
 
@@ -495,23 +497,22 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
         tw.write(token::Colon);
         if let (Some(start), Some(end)) = (arg.ty_start, arg.ty_end) {
             tw.copy_from_mark_range(start, end, GetMode::InnerDepth(args_start));
-            if arg.ty_ends_with_selfval {
-                // not actually a type, but something like &self;
-                // we already wrote 'x0: ' so change self to Self
-                if_rlex! { {
+            // we already wrote 'x0: ' so change self to Self
+            if_rlex! { {
+                if arg.ty_ends_with_selfval {
                     let len = tw.out.len();
                     tw.out[len - 4] = b'S';
-                } }
-                if_not_rlex! { {
-                    match tw.last_normal_token() {
-                        Some(&mut token::Ident(ref mut ident)) 
-                            if ident.name == keywords::SelfValue.name() => {
-                            *ident = keywords::SelfType.ident();
-                        },
-                        _ => unreachable!(),
-                    }
-                } }
-            }
+                }
+            } }
+            if_not_rlex! { {
+                match tw.last_normal_token() {
+                    Some(&mut token::Ident(ref mut ident))
+                        if ident.name == keywords::SelfValue.name() => {
+                        *ident = keywords::SelfType.ident();
+                    },
+                    _ => (),
+                }
+            } }
         } else {
             // huh?
             tw.write(token::Underscore);
@@ -861,10 +862,6 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                     let prev_arg = sp.last_ref_mut::<XAndCommon<DeclArg>>();
                     if prev_arg.x.ty_end.is_none() {
                         prev_arg.x.ty_end = Some(tr.mark_last());
-                        prev_arg.x.ty_ends_with_selfval = match st.token {
-                            &token::Ident(ident) if ident.name == keywords::SelfValue.name() => true,
-                            _ => false
-                        };
                     }
                 }
                 match st.token {
