@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::cell::UnsafeCell;
 
 pub type OutIdent = Ident;
-pub fn out_ident_from_ident(ident: &Ident) -> OutIdent { *indent }
+pub fn out_ident_from_ident(ident: &Ident) -> OutIdent { *ident }
 
 pub fn dummy_span() -> Span {
     syntax_pos::COMMAND_LINE_SP
@@ -46,7 +46,10 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
             },
         }
     }
-    pub fn write_ident(&mut self, ident_str: &str) {
+    pub fn write_outident(&mut self, outident: &OutIdent) {
+        self.write(Token::Ident(*outident))
+    }
+    pub fn write_ident_str(&mut self, ident_str: &str) {
         self.write(Token::Ident(Ident::with_empty_ctxt(token::intern(ident_str))))
     }
     pub fn copy_from_mark_range(&mut self, start: Mark, end: Mark, gm: GetMode) {

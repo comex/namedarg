@@ -10,7 +10,7 @@ use std::time::{Instant, Duration};
 
 fn nanos(d: Duration) -> u64 { d.as_secs() * 1000000000u64 + (d.subsec_nanos() as u64) }
 
-if_rparse! {
+if_rlex! {
     use namedarg::DummyExtCtxt;
     fn write_to_file(filename: &str, what: &[u8]) {
         std::fs::File::create(filename).unwrap().write_all(what).unwrap();
@@ -45,7 +45,7 @@ if_rparse! {
     }
 
 }
-if_not_rparse! {
+if_not_rlex! {
     use syntax::print::pprust;
     use syntax::parse::{ParseSess, filemap_to_tts};
     use syntax::tokenstream::TokenTree;

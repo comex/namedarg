@@ -1,4 +1,4 @@
-#![cfg_attr(not(feature = "use_rparse"), feature(plugin_registrar, rustc_private))]
+#![cfg_attr(not(feature = "use_rlex"), feature(plugin_registrar, rustc_private))]
 /*
 Known mishandled cases:
 macro_rules! a {
@@ -23,19 +23,19 @@ macro_rules! if_debug_assertions { {$($stuff:tt)*} => {} }
 #[cfg(debug_assertions)]
 macro_rules! if_debug_assertions { {$($stuff:tt)*} => {$($stuff)*} }
 
-#[cfg(not(feature = "use_rparse"))]
+#[cfg(not(feature = "use_rlex"))]
 #[macro_export]
-macro_rules! if_rparse { {$($stuff:tt)*} => {} }
-#[cfg(feature = "use_rparse")]
+macro_rules! if_rlex { {$($stuff:tt)*} => {} }
+#[cfg(feature = "use_rlex")]
 #[macro_export]
-macro_rules! if_rparse { {$($stuff:tt)*} => {$($stuff)*} }
+macro_rules! if_rlex { {$($stuff:tt)*} => {$($stuff)*} }
 
-#[cfg(not(feature = "use_rparse"))]
+#[cfg(not(feature = "use_rlex"))]
 #[macro_export]
-macro_rules! if_not_rparse { {$($stuff:tt)*} => {$($stuff)*} }
-#[cfg(feature = "use_rparse")]
+macro_rules! if_not_rlex { {$($stuff:tt)*} => {$($stuff)*} }
+#[cfg(feature = "use_rlex")]
 #[macro_export]
-macro_rules! if_not_rparse { {$($stuff:tt)*} => {} }
+macro_rules! if_not_rlex { {$($stuff:tt)*} => {} }
 
 pub enum GetMode {
     InnerDepth(Mark),
@@ -62,7 +62,7 @@ pub struct SpanToken<'a> {
 
 enum Judge { Expected, Ignore, Unexpected, }
 
-if_not_rparse! {
+if_not_rlex! {
     extern crate rustc_plugin;
     extern crate rustc_errors as errors;
     #[macro_use]
@@ -105,12 +105,12 @@ if_not_rparse! {
         }
     }
 }
-if_rparse! {
-    mod rparse;
-    pub use rparse::{Ident, BinOp, DelimToken, Token, token, keywords};
+if_rlex! {
+    mod rlex;
+    pub use rlex::{Ident, BinOp, DelimToken, Token, token, keywords};
 
-    mod ttrw_rparse;
-    pub use ttrw_rparse::{TTWriter, TTReader, Mark, Span, OutIdent, dummy_span, out_ident_from_ident};
+    mod ttrw_rlex;
+    pub use ttrw_rlex::{TTWriter, TTReader, Mark, Span, OutIdent, dummy_span, out_ident_from_ident};
 
     fn judge_other_token(tok: &Token) -> Judge {
         match tok {
@@ -162,10 +162,10 @@ fn mutate_name<'a, I>(fn_name_ident: &Ident, arg_names: I, ctx: &Context) -> Out
     if !ctx.use_valid_idents {
         name.push('}');
     }
-    if_rparse! {
+    if_rlex! {
         name
     }
-    if_not_rparse! {
+    if_not_rlex! {
         Ident { name: token::intern(&name), ctxt: fn_name_ident.ctxt }
     }
 }
@@ -175,7 +175,7 @@ pub trait ExtCtxtish {
     fn span_warn(&self, sp: Span, msg: &str);
 }
 
-if_rparse! {
+if_rlex! {
     use std::cell::Cell;
     pub struct DummyExtCtxt {
         err_count: Cell<usize>
@@ -198,7 +198,7 @@ if_rparse! {
         }
     }
 }
-if_not_rparse! {
+if_not_rlex! {
     impl<'a> ExtCtxtish for ExtCtxt<'a> {
         fn span_err(&self, sp: Span, msg: &str) { ExtCtxt::span_err(self, sp, msg) }
         fn span_warn(&self, sp: Span, msg: &str) { ExtCtxt::span_warn(self, sp, msg) }
@@ -470,9 +470,9 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
     // #[allow(dead_code)]
     tw.write(token::Pound);
     tw.write(token::OpenDelim(DelimToken::Bracket));
-    tw.write_ident("allow");
+    tw.write_ident_str("allow");
     tw.write(token::OpenDelim(DelimToken::Paren));
-    tw.write_ident("dead_code");
+    tw.write_ident_str("dead_code");
     tw.write(token::CloseDelim(DelimToken::Paren));
     tw.write(token::CloseDelim(DelimToken::Bracket));
 
@@ -489,7 +489,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
             Some(arg.name.as_ref())
         })
     }, ctx);
-    tw.write_ident(&partial_name);
+    tw.write_outident(&partial_name);
     if let Some(generic_start) = generic_start {
         tw.copy_from_mark_range(generic_start, args_start, GetMode::SameDepth);
     }
@@ -505,7 +505,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
             }
         }
         let arg_name = format!("x{}", arg_names.len());
-        tw.write_ident(&arg_name);
+        tw.write_ident_str(&arg_name);
         arg_names.push(arg_name);
         tw.write(token::Colon);
         if let (Some(start), Some(end)) = (arg.ty_start, arg.ty_end) {
@@ -513,11 +513,11 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
             if arg.ty_ends_with_selfval {
                 // not actually a type, but something like &self;
                 // we already wrote 'x0: ' so change self to Self
-                if_rparse! { {
+                if_rlex! { {
                     let len = tw.out.len();
                     tw.out[len - 4] = b'S';
                 } }
-                if_not_rparse! { {
+                if_not_rlex! { {
                     match tw.last_normal_token() {
                         Some(&mut token::Ident(ref mut ident)) 
                             if ident.name == keywords::SelfValue.name() => {
@@ -552,10 +552,10 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
         tw.write(token::ModSep);
     }
 
-    tw.write_ident(new_full_name);
+    tw.write_outident(new_full_name);
     tw.write(token::OpenDelim(DelimToken::Paren));
     for name in arg_names {
-        tw.write_ident(&name);
+        tw.write_ident_str(&name);
         tw.write(token::Comma);
     }
     tw.write(token::CloseDelim(DelimToken::Paren));
@@ -630,10 +630,10 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                     &token::Ident(ref ident) => {
                         // XXX trait, attr
                         let name = ident.name;
-                        if_rparse! {
+                        if_rlex! {
                             let big = false;
                         }
-                        if_not_rparse! {
+                        if_not_rlex! {
                             let big = name.0 >= keywords::Default.name().0;
                         }
                         if big ||
@@ -1302,7 +1302,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
     }
 }
 
-if_not_rparse! {
+if_not_rlex! {
     fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
         -> Box<MacResult + 'static> {
         let mut parser = cx.new_parser_from_tts(args);

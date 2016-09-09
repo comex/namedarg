@@ -1,5 +1,5 @@
 use {GetMode, SpanToken, Storage};
-use rparse::{Lexer, token, Token, DelimToken, Ident};
+use rlex::{Lexer, token, Token, DelimToken, Ident};
 use std::cell::UnsafeCell;
 
 pub type OutIdent = String;
@@ -47,8 +47,11 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
         };
         self.out.extend_from_slice(s.as_bytes());
     }
-    pub fn write_ident(&mut self, ident_str: &str) {
+    pub fn write_ident_str(&mut self, ident_str: &str) {
         self.out.extend_from_slice(ident_str.as_bytes());
+    }
+    pub fn write_outident(&mut self, outident: &OutIdent) {
+        self.write_ident_str(outident)
     }
     pub fn copy_from_mark_range(&mut self, start: Mark, end: Mark, _: GetMode) {
         self.out.extend_from_slice(&self.tr.data[start.pos..end.pos]);
