@@ -367,9 +367,4 @@ impl<'a> Lexer<'a> {
     pub fn col(&self) -> usize {
         1 + self.pos() - self.line_start_pos
     }
-    pub fn set_pos(&mut self, pos: usize) {
-        self.lineno = 1000000;
-        self.read.pos = pos;
-        self.read.advance();
-    }
 }

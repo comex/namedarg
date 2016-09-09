@@ -3,9 +3,6 @@ use rlex::{Lexer, token, Token, DelimToken, Ident};
 use std::cell::UnsafeCell;
 use std::str;
 
-pub type OutIdent = String;
-pub fn out_ident_to_string(ident: &OutIdent) -> String { ident.clone() }
-
 pub struct Splice {
     pos: usize,
     len: usize,
@@ -16,6 +13,17 @@ pub struct Splice {
 pub struct Mark {
     pos: usize,
 }
+#[derive(Copy, Clone, Debug)]
+pub struct InIdent {
+    start: usize,
+    end: usize,
+}
+impl InIdent {
+    pub fn mark(&self) -> Mark {
+        Mark { pos: self.start }
+    }
+}
+
 #[derive(Copy, Clone)]
 pub struct Span {
     pub pos: usize,
@@ -55,9 +63,6 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
     }
     pub fn write_ident_str(&mut self, ident_str: &str) {
         self.out.extend_from_slice(ident_str.as_bytes());
-    }
-    pub fn write_outident(&mut self, outident: &OutIdent) {
-        self.write_ident_str(outident)
     }
     pub fn copy_from_mark_range(&mut self, start: Mark, end: Mark, _: GetMode) {
         self.out.extend_from_slice(&self.tr.data[start.pos..end.pos]);
@@ -116,6 +121,12 @@ impl<'a> TTReader<'a> {
     pub fn mark_next(&self) -> Mark {
         Mark { pos: self.lexer.pos() }
     }
+    pub fn last_ii(&self, _: &Ident) -> InIdent {
+        InIdent {
+            start: self.mark_last().pos,
+            end: self.lexer.pos(),
+        }
+    }
     pub fn delete_mark_range(&mut self, start: Mark, end: Mark) {
         if start.pos == end.pos { return; }
         self.splices.push(Splice {
@@ -124,23 +135,15 @@ impl<'a> TTReader<'a> {
             new: Vec::new(),
         });
     }
-    pub fn mutate_ident<F>(&mut self, mark: Mark, f: F) where F: FnOnce(OutIdent) -> OutIdent {
-        let mut lexer_copy = self.lexer;
-        lexer_copy.set_pos(mark.pos);
-        let ident: OutIdent = match lexer_copy.next() {
-            token::Ident(_) => str::from_utf8(&self.data[mark.pos..lexer_copy.pos()]).unwrap().to_owned(),
-            _ => unreachable!(),
-        };
-        let new = f(ident);
-        if lexer_copy.pos() == mark.pos { return; }
+    pub fn mutate_ident(&mut self, ii: InIdent, new: String) {
         self.splices.push(Splice {
-            pos: mark.pos,
-            len: lexer_copy.pos() - mark.pos,
+            pos: ii.start,
+            len: ii.end - ii.start,
             new: new.into_bytes(),
         });
     }
-    pub fn last_out_ident(&self, span: &Span, _: &Ident) -> OutIdent {
-        str::from_utf8(&self.data[span.pos..self.lexer.pos()]).unwrap().to_owned()
+    pub fn get_ident_str(&self, ii: InIdent) -> &'a str {
+        str::from_utf8(&self.data[ii.start..ii.end]).unwrap()
     }
     pub fn writer<'x>(&'x mut self) -> TTWriter<'x, 'a> {
         let pos = self.lexer.pos();

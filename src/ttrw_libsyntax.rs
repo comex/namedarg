@@ -9,15 +9,9 @@ use std::mem::replace;
 use std::rc::Rc;
 use std::cell::UnsafeCell;
 
-pub type OutIdent = Ident;
-pub fn out_ident_to_string(ident: &OutIdent) -> String {
-    (*ident.name.as_str()).to_owned();
-}
-
 pub fn dummy_span() -> Span {
     syntax_pos::COMMAND_LINE_SP
 }
-
 
 pub struct TTWriter<'x, 'a: 'x> {
     tr: &'x mut TTReader<'a>,
@@ -47,9 +41,6 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
                 self.output.push(TokenTree::Token(self.span, tok));
             },
         }
-    }
-    pub fn write_outident(&mut self, outident: &OutIdent) {
-        self.write(Token::Ident(*outident))
     }
     pub fn write_ident_str(&mut self, ident_str: &str) {
         self.write(Token::Ident(Ident::with_empty_ctxt(token::intern(ident_str))))
@@ -107,6 +98,17 @@ impl Mark {
     }
 }
 */
+#[derive(Copy, Clone, Debug)]
+pub struct InIdent {
+    mark: Mark,
+    ident: Ident,
+}
+impl InIdent {
+    #[inline]
+    pub fn mark(&self) -> Mark {
+        self.mark
+    }
+}
 
 pub struct TTReader<'a> {
     stack: Vec<(&'a [TokenTree], &'a [TokenTree], Option<Vec<TokenTree>>)>,
@@ -233,6 +235,12 @@ impl<'a> TTReader<'a> {
             cur_stack_depth: make_cur_stack_depth(self.stack.len()),
         }
     }
+    pub fn last_ii(&self, ident: &Ident) -> InIdent {
+        InIdent {
+            mark: self.mark_last(),
+            ident: *ident,
+        }
+    }
     #[cfg(debug_assertions)]
     fn check_offset(&self) {
         assert_eq!(self.cur_offset, if let Some(ref o) = self.output { o.len() } else { self.offset_in_whole() });
@@ -259,17 +267,18 @@ impl<'a> TTReader<'a> {
             self.output = Some(vec);
         }
     }
-    #[inline(always)]
-    pub fn last_out_ident(&self, _: &Span, ident: &Ident) -> OutIdent {
-        *ident
-    }
-    pub fn mutate_ident<F>(&mut self, mark: Mark, f: F) where F: FnOnce(Ident) -> OutIdent {
-        let name = self.mutate_mark(mark);
+    pub fn mutate_ident(&mut self, ii: InIdent, new: String) {
+        let name = self.mutate_mark(ii.mark);
         if let TokenTree::Token(_, token::Ident(ref mut ident)) = *name {
-            *ident = f(*ident);
+            *ident = Ident::with_empty_ctxt(token::intern(new));
         } else {
             unreachable!()
         }
+    }
+    pub fn get_ident_str(&self, ii: InIdent) -> &'a str {
+        let ident = &ii.ident;
+        let s: &str = &*ident.name.as_str();
+        unsafe { transmute(s) }
     }
     fn mutate_mark(&mut self, mark: Mark) -> &mut TokenTree {
         self.check_mark(mark);
