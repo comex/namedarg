@@ -6,7 +6,7 @@ authors = ["comex <comexk@gmail.com>"]
 [dependencies]
 
 [lib]
-crate-type = ["dylib"]
+crate-type = ["dylib", "rlib"]
 
 [features]
 derive_debug = []

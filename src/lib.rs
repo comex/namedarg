@@ -8,8 +8,10 @@ macro_rules! a {
 */
 
 use std::mem::{replace, size_of, transmute};
+#[allow(unused_imports)] // XXX
 use std::cell::UnsafeCell;
 use std::slice;
+use std::ptr;
 
 #[cfg(not(feature = "println_spam"))]
 macro_rules! if_println_spam { {$($stuff:tt)*} => {} }
@@ -22,13 +24,17 @@ macro_rules! if_debug_assertions { {$($stuff:tt)*} => {} }
 macro_rules! if_debug_assertions { {$($stuff:tt)*} => {$($stuff)*} }
 
 #[cfg(not(feature = "use_rparse"))]
+#[macro_export]
 macro_rules! if_rparse { {$($stuff:tt)*} => {} }
 #[cfg(feature = "use_rparse")]
+#[macro_export]
 macro_rules! if_rparse { {$($stuff:tt)*} => {$($stuff)*} }
 
 #[cfg(not(feature = "use_rparse"))]
+#[macro_export]
 macro_rules! if_not_rparse { {$($stuff:tt)*} => {$($stuff)*} }
 #[cfg(feature = "use_rparse")]
+#[macro_export]
 macro_rules! if_not_rparse { {$($stuff:tt)*} => {} }
 
 pub enum GetMode {
@@ -91,6 +97,7 @@ if_not_rparse! {
             &token::DocComment(..) | &token::Whitespace | &token::Comment | &token::Shebang(..) |
             &token::Eof =>
                 Judge::Ignore,
+
             &token::Ident(_) | &token::OpenDelim(_) | &token::CloseDelim(_) |
             &token::Comma | &token::Colon | &token::Lt |
             &token::Semi | &token::Question | &token::Literal(..) | &token::Underscore |
@@ -110,10 +117,15 @@ if_rparse! {
             &token::Dummy => Judge::Unexpected,
             &token::Gt | &token::Not |
             &token::BinOp(_) | &token::DotDot | &token::DotDotDot |
-            &token::ModSep | &token::Dollar |
+            &token::ModSep | &token::Dollar | &token::Eq | &token::RArrow |
             &token::Other =>
                 Judge::Expected,
             &token::Eof => Judge::Ignore,
+
+            &token::Ident(_) | &token::OpenDelim(_) | &token::CloseDelim(_) |
+            &token::Comma | &token::Colon | &token::Lt |
+            &token::Semi | &token::Question | &token::Literal(..) | &token::Underscore |
+            &token::Pound | &token::Lifetime(..) => unreachable!(),
         }
     }
 }
@@ -164,13 +176,25 @@ pub trait ExtCtxtish {
 }
 
 if_rparse! {
-    struct DummyExtCtxt;
+    use std::cell::Cell;
+    pub struct DummyExtCtxt {
+        err_count: Cell<usize>
+    }
     impl ExtCtxtish for DummyExtCtxt {
         fn span_err(&self, sp: Span, msg: &str) {
             println!("{}:{}: error: {}", sp.line, sp.col, msg);
+            self.err_count.set(self.err_count.get() + 1);
         }
         fn span_warn(&self, sp: Span, msg: &str) {
             println!("{}:{}: warning: {}", sp.line, sp.col, msg);
+        }
+    }
+    impl DummyExtCtxt {
+        pub fn new() -> Self {
+            DummyExtCtxt { err_count: Cell::new(0) }
+        }
+        pub fn err_count(&self) -> usize {
+            self.err_count.get()
         }
     }
 }
@@ -191,50 +215,68 @@ pub struct Context<'x> {
 }
 
 
+macro_rules! derive_variant_data_inner2 {
+    ($enum_name:ident ;
+     $variant_name:ident ;
+     ($($derives:tt)*) ;
+     [$($struct_fields:tt)*] ;
+     $_self:tt ;
+     [$($_self_fields:tt)*]) => {
+        #[derive($($derives)*)]
+        #[cfg_attr(feature = "derive_debug", derive(Debug))]
+        pub struct $variant_name $($struct_fields)*
+        impl $variant_name {
+            #[inline(always)]
+            #[allow(dead_code)]
+            pub fn variant(&self) -> StateVariant { StateVariant::$variant_name }
+            #[inline(always)]
+            #[allow(dead_code)]
+            pub fn to_state($_self) -> State {
+                State::$variant_name $($_self_fields)*
+            }
+        }
+    }
+}
+
 macro_rules! derive_variant_data_inner {
-    ($e:ident ; $enum_name:ident ; $variant_name:ident , $($rest:tt)* ) => {
-        #[derive(Clone, Copy)]
-        #[cfg_attr(feature = "derive_debug", derive(Debug))]
-        pub struct $variant_name;
-        impl $variant_name {
-            #[inline(always)]
-            #[allow(dead_code)]
-            pub fn variant(&self) -> StateVariant { StateVariant::$variant_name }
-            #[inline(always)]
-            #[allow(dead_code)]
-            pub fn to_state(&self) -> State {
-                State::$variant_name
-            }
-        }
-        derive_variant_data_inner!($e ; $enum_name ; $($rest)*);
+    ($enum_name:ident ; $variant_name:ident , $($rest:tt)* ) => {
+        derive_variant_data_inner2!($enum_name ;
+                                    $variant_name ;
+                                    (Copy, Clone) ;
+                                    [;] ;
+                                    self ;
+                                    []);
+        derive_variant_data_inner!($enum_name ; $($rest)*);
     };
-    ($e:ident ; $enum_name:ident ; $variant_name:ident { $($name:ident : $ty:ty),* } , $($rest:tt)* ) => {
-        #[derive(Clone, Copy)]
-        #[cfg_attr(feature = "derive_debug", derive(Debug))]
-        pub struct $variant_name { $(pub $name: $ty),* }
-        impl $variant_name {
-            #[inline(always)]
-            #[allow(dead_code)]
-            pub fn variant(&self) -> StateVariant { StateVariant::$variant_name }
-            #[inline(always)]
-            #[allow(dead_code)]
-            pub fn to_state(&self) -> State {
-                State::$variant_name { $($name: self.$name),* }
-            }
-        }
-        derive_variant_data_inner!($e ; $enum_name ; $($rest)*);
+    ($enum_name:ident ; DeclEnd { $($name:ident : $ty:ty),* } , $($rest:tt)* ) => {
+        derive_variant_data_inner2!($enum_name ;
+                                    DeclEnd ;
+                                    (Clone) ;
+                                    [{ $(pub $name : $ty),* }] ;
+                                    self ;
+                                    [{ $($name: self.$name),* }]);
+        derive_variant_data_inner!($enum_name ; $($rest)*);
     };
-    ($e:ident ; $enum_name:ident ;) => ()
+    ($enum_name:ident ; $variant_name:ident { $($name:ident : $ty:ty),* } , $($rest:tt)* ) => {
+        derive_variant_data_inner2!($enum_name ;
+                                    $variant_name ;
+                                    (Copy, Clone) ;
+                                    [{ $(pub $name : $ty),* }] ;
+                                    self ;
+                                    [{ $($name: self.$name),* }]);
+        derive_variant_data_inner!($enum_name ; $($rest)*);
+    };
+    ($enum_name:ident ;) => ()
 }
 macro_rules! derive_variant_data {
     { pub enum $enum_name:ident { $($args:tt)* } } => {
         #[allow(non_snake_case)]
         mod VariantData {
-            use super::{State, Mark, StateVariant, XAndCommon, DeclStuff, DeclArg, Ident, VariantData, StackPtr, DTMode};
-            derive_variant_data_inner!(e ; $enum_name ; $($args)* );
+            use super::{State, Mark, StateVariant, XAndCommon, DeclStuff, DeclArg, Ident, VariantData, StackPtr, DTMode, OutIdent};
+            derive_variant_data_inner!($enum_name ; $($args)*);
         }
         #[cfg_attr(feature = "derive_debug", derive(Debug))]
-        #[derive(Clone, Copy)]
+        #[derive(Clone)]
         pub enum $enum_name { $($args)* }
     }
 }
@@ -249,7 +291,7 @@ pub enum State {
     GotFnName { name: Mark, generic_start: Option<Mark> },
     CallArgStart,
     DeclArgStart { pending_default: bool },
-    DeclEnd { first_arg: StackPtr, decl: &'static DeclStuff, davs: &'static [XAndCommon<DeclArg>], old_name: Ident, new_full_name: Ident, args_end: Mark, decl_end: Option<Mark> },
+    DeclEnd { first_arg: StackPtr, decl: &'static DeclStuff, davs: &'static [XAndCommon<DeclArg>], old_name: Ident, new_full_name: OutIdent, args_end: Mark, decl_end: Option<Mark> },
     SeekingSemiOrOpenBrace,
     DefinitelyType { angle_depth: u32, mode: DTMode, start_of_type: bool }, // pops on closing >, skipping it
     LambdaEnd,
@@ -330,7 +372,18 @@ impl StackPtr {
         }
     }
     #[inline(always)]
-    fn last_ref<T: Copy>(self) -> &'static T {
+    fn pop_val<T>(&mut self) -> T {
+        unsafe {
+            let count = (size_of::<T>() + 7) / 8;
+            if_println_spam! {
+                println!("popping {} u64s", count);
+            }
+            self.0 = self.0.offset(-(count as isize));
+            ptr::read(self.0 as *mut T)
+        }
+    }
+    #[inline(always)]
+    fn last_ref<T>(self) -> &'static T {
         unsafe {
             let count = (size_of::<T>() + 7) / 8;
             let p = self.0.offset(-(count as isize));
@@ -338,7 +391,7 @@ impl StackPtr {
         }
     }
     #[inline(always)]
-    fn last_ref_mut<T: Copy>(self) -> &'static mut T {
+    fn last_ref_mut<T>(self) -> &'static mut T {
         unsafe {
             let count = (size_of::<T>() + 7) / 8;
             let p = self.0.offset(-(count as isize));
@@ -346,7 +399,7 @@ impl StackPtr {
         }
     }
     #[inline(always)]
-    fn push<T: Copy>(&mut self, top: StackPtr, t: T) -> &'static mut T {
+    fn push<T>(&mut self, top: StackPtr, t: T) -> &'static mut T {
         unsafe {
             if (top.0 as usize) - (self.0 as usize) < size_of::<T>() {
                 panic!("stack overflow");
@@ -371,11 +424,12 @@ pub struct DeclStuff {
     args_start: Mark,
 }
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Default)]
 pub struct DeclArg {
     name: Option<Ident>,
     ty_start: Option<Mark>,
     ty_end: Option<Mark>,
+    ty_ends_with_selfval: bool,
     is_default: bool,
 }
 
@@ -399,19 +453,19 @@ impl Common {
 #[cfg_attr(feature = "derive_debug", derive(Debug))]
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct XAndCommon<X: Copy> {
+pub struct XAndCommon<X> {
     x: X,
     c: Common,
 }
 
-impl<X: Copy> XAndCommon<X> {
+impl<X> XAndCommon<X> {
     #[inline(always)]
     fn new(x: X, common: Common) -> Self {
         XAndCommon { x: x, c: common }
     }
 }
 
-fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &Ident, new_full_name: &Ident, cur_in_trait_or_impl: Option<&'static VariantData::InTraitOrImpl>, ctx: &Context) {
+fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num_include: usize, generic_start: Option<Mark>, args_start: Mark, args_end: Mark, decl_end: Mark, old_name: &Ident, new_full_name: &OutIdent, cur_in_trait_or_impl: Option<&'static VariantData::InTraitOrImpl>, ctx: &Context) {
     let mut tw: TTWriter = tr.writer();
     // #[allow(dead_code)]
     tw.write(token::Pound);
@@ -435,7 +489,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
             Some(arg.name.as_ref())
         })
     }, ctx);
-    tw.write(token::Ident(partial_name));
+    tw.write_ident(&partial_name);
     if let Some(generic_start) = generic_start {
         tw.copy_from_mark_range(generic_start, args_start, GetMode::SameDepth);
     }
@@ -456,10 +510,22 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
         tw.write(token::Colon);
         if let (Some(start), Some(end)) = (arg.ty_start, arg.ty_end) {
             tw.copy_from_mark_range(start, end, GetMode::InnerDepth(args_start));
-            if let Some(&mut token::Ident(ref mut ident)) = tw.last_normal_token() {
-                if ident.name == keywords::SelfValue.name() {
-                    *ident = keywords::SelfType.ident();
-                }
+            if arg.ty_ends_with_selfval {
+                // not actually a type, but something like &self;
+                // we already wrote 'x0: ' so change self to Self
+                if_rparse! { {
+                    let len = tw.out.len();
+                    tw.out[len - 4] = b'S';
+                } }
+                if_not_rparse! { {
+                    match tw.last_normal_token() {
+                        Some(&mut token::Ident(ref mut ident)) 
+                            if ident.name == keywords::SelfValue.name() => {
+                            *ident = keywords::SelfType.ident();
+                        },
+                        _ => unreachable!(),
+                    }
+                } }
             }
         } else {
             // huh?
@@ -486,7 +552,7 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
         tw.write(token::ModSep);
     }
 
-    tw.write(token::Ident(*new_full_name));
+    tw.write_ident(new_full_name);
     tw.write(token::OpenDelim(DelimToken::Paren));
     for name in arg_names {
         tw.write_ident(&name);
@@ -524,7 +590,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
         pushx_manual!(_vdata.variant(), _vdata)
     } } }
     macro_rules! popx { ($vdata_ty:ty) => { {
-        let xac = sp.pop_ref::<XAndCommon<$vdata_ty>>();
+        let xac = sp.pop_val::<XAndCommon<$vdata_ty>>();
         debug_assert_eq!(xac.c.variant, xac.c.variant() as u8);
         if_println_spam! {
             println!("popping {:?}", xac);
@@ -624,7 +690,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                             let mut test = sp;
                             if test.pop_ref::<Common>().variant() == StateVariant::DeclArgStart {
                                 test.pop_ref::<VariantData::DeclArgStart>();
-                                let data = test.pop_ref::<XAndCommon<DeclArg>>();
+                                let data = test.last_ref_mut::<XAndCommon<DeclArg>>();
                                 data.x.ty_start = Some(tr.mark_next());
                             }
                             pushx!(VariantData::Null { expecting_operator: true, after_semi_or_brace: false });
@@ -806,6 +872,10 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                     let prev_arg = sp.last_ref_mut::<XAndCommon<DeclArg>>();
                     if prev_arg.x.ty_end.is_none() {
                         prev_arg.x.ty_end = Some(tr.mark_last());
+                        prev_arg.x.ty_ends_with_selfval = match st.token {
+                            &token::Ident(ident) if ident.name == keywords::SelfValue.name() => true,
+                            _ => false
+                        };
                     }
                 }
                 match st.token {
@@ -822,11 +892,15 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                                 tr.delete_mark_range(to_delete, to);
                                 match st.token {
                                     &token::Ident(ident1) => {
-                                        pushx_manual!(StateVariant::DeclArg, DeclArg { name: Some(ident1), ty_start: None, ty_end: None, is_default: pending_default });
+                                        pushx_manual!(StateVariant::DeclArg, DeclArg {
+                                            name: Some(ident1), is_default: pending_default, ..DeclArg::default()
+                                        });
                                         pushx!(VariantData::DeclArgStart { pending_default: false });
                                     },
                                     &Token::Underscore => {
-                                        pushx_manual!(StateVariant::DeclArg, DeclArg { name: Some(ident2), ty_start: None, ty_end: None, is_default: pending_default });
+                                        pushx_manual!(StateVariant::DeclArg, DeclArg {
+                                            name: Some(ident2), is_default: pending_default, ..DeclArg::default()
+                                        });
                                         pushx!(VariantData::DeclArgStart { pending_default: false });
                                         let st3 = st_or_return!();
                                         if let &Token::Colon = st3.token {} else {
@@ -843,7 +917,9 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                                     &token::Ident(ident1) => {
                                         let to = tr.mark_last();
                                         tr.delete_mark_range(to_delete, to);
-                                        pushx_manual!(StateVariant::DeclArg, DeclArg { name: Some(ident1), ty_start: None, ty_end: None, is_default: pending_default });
+                                        pushx_manual!(StateVariant::DeclArg, DeclArg {
+                                            name: Some(ident1), is_default: pending_default, ..DeclArg::default()
+                                        });
                                         pushx!(VariantData::DeclArgStart { pending_default: false });
                                     },
                                     &Token::Underscore => {
@@ -854,7 +930,9 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                             },
                             _ => {
                                 // this could just be a type
-                                pushx_manual!(StateVariant::DeclArg, DeclArg { name: None, ty_start: Some(to_delete), ty_end: None, is_default: pending_default });
+                                pushx_manual!(StateVariant::DeclArg, DeclArg {
+                                    ty_start: Some(to_delete), is_default: pending_default, ..DeclArg::default()
+                                });
                                 pushx!(VariantData::DeclArgStart { pending_default: false });
                                 st = st2;
                             },
@@ -880,7 +958,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                                     break;
                                 },
                                 StateVariant::DeclArg => {
-                                    let arg = sp.pop_ref::<DeclArg>();
+                                    let arg = sp.pop_val::<DeclArg>();
                                     if arg.name.is_some() || arg.is_default { any = true; }
                                     if arg.is_default { any_default = true; }
                                     num_args += 1;
@@ -890,11 +968,11 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                             }
                         }
                         if any {
-                            let mut old_new: Option<(Ident, Ident)> = None;
+                            let mut old_new: Option<(Ident, OutIdent)> = None;
                             let davs: &'static [XAndCommon<DeclArg>] = unsafe { slice::from_raw_parts(transmute(first_arg.ptr()), num_args) };
                             tr.mutate_ident(decl.name, |orig_ident| {
                                 let new_full_name = mutate_name(&orig_ident, davs.iter().map(|dav| dav.x.name.as_ref()), ctx);
-                                old_new = Some((orig_ident, new_full_name));
+                                old_new = Some((orig_ident, new_full_name.clone()));
                                 new_full_name
                             });
                             // generate stubs for default arguments
@@ -931,7 +1009,9 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                     &token::Comma => continue_next!(State::DeclArgStart { pending_default: false }),
                     _ => (),
                 }
-                pushx_manual!(StateVariant::DeclArg, DeclArg { name: None, ty_start: Some(tr.mark_last()), ty_end: None, is_default: pending_default });
+                pushx_manual!(StateVariant::DeclArg, DeclArg {
+                    ty_start: Some(tr.mark_last()), is_default: pending_default, ..DeclArg::default()
+                });
                 pushx!(VariantData::DeclArgStart { pending_default: false });
                 in_func_parens = true;
                 continue_same!(State::Null { expecting_operator: false, after_semi_or_brace: false });

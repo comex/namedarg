@@ -1,4 +1,5 @@
 use std::str;
+#[allow(non_snake_case)]
 fn Pattern_White_Space(c: u32) -> bool {
     match c {
         0x9 ... 0xd | 0x20 | 0x85 |
@@ -42,13 +43,13 @@ impl<'a> Reader<'a> {
     }
     fn next_utf8(&mut self) -> u32 {
         let c = self.next();
-        let mut num_bytes = (!c).leading_zeros();
+        let num_bytes = (!c).leading_zeros();
         match num_bytes {
             2 | 3 | 4 => (),
             _ => return c as u32,
         }
         let mut chr = (c & (0x7f >> num_bytes)) as u32;
-        for i in 0..num_bytes {
+        for _ in 0..num_bytes {
             let c = self.cur;
             if c & 0xc0 != 0x80 { break; }
             self.advance();
@@ -70,11 +71,13 @@ impl<'a> Reader<'a> {
     }
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum DelimToken {
     Paren,
     Bracket,
     Brace,
 }
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum BinOp {
     And,
     Or,
@@ -82,7 +85,7 @@ pub enum BinOp {
     Plus,
     Shr,
 }
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct Ident {
     pub name: Name,
 }
@@ -91,16 +94,17 @@ pub struct Keyword {
     pub ident: Ident,
 }
 impl Keyword {
-    fn ident(self) -> Ident { self.ident }
-    fn name(self) -> Name { self.ident.name }
+    pub fn ident(self) -> Ident { self.ident }
+    pub fn name(self) -> Name { self.ident.name }
 }
 macro_rules! define_idents {
     {$(($name:ident : $($str:tt)*)),*,} => {
-        #[derive(Copy, Clone)]
+        #[derive(Copy, Clone, PartialEq, Eq, Debug)]
         pub enum Name {
             $($name),*,
             Other
         }
+        #[allow(non_upper_case_globals)]
         pub mod keywords {
             use super::{Ident, Name, Keyword};
             $(
@@ -123,8 +127,8 @@ macro_rules! define_idents {
         impl Ident {
             pub fn from_bytes(bytes: &[u8]) -> Self {
                 match bytes {
-                    $($($str)* => keywords::$name),*,
-                    _ => keywords::Other,
+                    $($($str)* => Ident { name: Name::$name }),*,
+                    _ => Ident { name: Name::Other },
                 }
             }
         }
@@ -147,6 +151,7 @@ define_idents! {
     (Unsafe: b"unsafe"),
     (Where: b"where"),
 }
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Token {
     OpenDelim(DelimToken),
     CloseDelim(DelimToken),
@@ -239,14 +244,13 @@ impl<'a> Lexer<'a> {
         while self.read.next() != b'\n' && !self.read.at_eof() {}
         self.bump_lineno();
     }
-    fn scan_ident(&mut self) -> Token {
-        let start = self.read.pos_of_cur();
+    fn scan_ident(&mut self, start: usize) -> Token {
         loop {
             match self.read.cur {
                 b'a' ... b'z' | b'A' ... b'Z' | b'_' | b'0' ... b'9' => self.read.advance(),
 
                 b'\x00' ... b'\x7f' => { break },
-                b'\x80' ... b'\xff' => {
+                _ => {
                     let c = self.read.next_utf8();
                     if Pattern_White_Space(c) { break; }
                     // again, assume unknown unicode chars are XID_Continue
@@ -254,17 +258,22 @@ impl<'a> Lexer<'a> {
             }
         }
         let end = self.read.pos_of_cur();
-        Token::Ident(Ident::from_bytes(&self.read.data[start..end]))
+        if start + 1 == end && self.read.data[start] == b'_' {
+            Token::Underscore
+        } else {
+            Token::Ident(Ident::from_bytes(&self.read.data[start..end]))
+        }
     }
     fn next_unicode(&mut self) -> Option<Token> {
         self.read.rewind();
+        let pos = self.read.pos_of_cur();
         let c = self.read.next_utf8();
         if Pattern_White_Space(c) {
             if c == (b'\n' as u32) { self.bump_lineno(); }
             return None;
         }
         // assume it's an ident
-        return Some(self.scan_ident());
+        return Some(self.scan_ident(pos));
     }
     pub fn next(&mut self) -> Token {
         loop {
@@ -298,7 +307,6 @@ impl<'a> Lexer<'a> {
                 b';' => Token::Semi,
                 b'?' => Token::Question,
                 b'$' => Token::Dollar,
-                b'_' => Token::Underscore,
                 b'=' => Token::Eq,
                 b'-' => match self.read.cur {
                     b'>' => { self.read.advance(); Token::RArrow },
@@ -318,7 +326,10 @@ impl<'a> Lexer<'a> {
                 b'+' => Token::BinOp(BinOp::Plus),
                 b' ' | b'\t' | b'\r' => continue,
                 b'\n' => { self.bump_lineno(); continue },
-                b'a' ... b'z' | b'A' ... b'Z' | b'_' => self.scan_ident(),
+                b'a' ... b'z' | b'A' ... b'Z' | b'_' => {
+                    let pos = self.read.pos_of_cur() - 1;
+                    self.scan_ident(pos)
+                },
                 b'\x00' ... b'\x7f' => Token::Other,
                 _ => {
                     if let Some(tok) = self.next_unicode() { tok } else { continue }

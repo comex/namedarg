@@ -1,4 +1,4 @@
-use {GetMode, SpanToken, Storage, rparse};
+use {GetMode, SpanToken, Storage};
 use rparse::{Lexer, token, Token, DelimToken, Ident};
 use std::cell::UnsafeCell;
 
@@ -27,7 +27,7 @@ pub fn dummy_span() -> Span {
 pub struct TTWriter<'x, 'a: 'x> {
     tr: &'x mut TTReader<'a>,
     pos: usize,
-    out: Vec<u8>,
+    pub out: Vec<u8>,
 }
 impl<'x, 'a: 'x> TTWriter<'x, 'a> {
     pub fn write(&mut self, tok: Token) {
@@ -50,6 +50,9 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
     pub fn write_ident(&mut self, ident_str: &str) {
         self.out.extend_from_slice(ident_str.as_bytes());
     }
+    pub fn copy_from_mark_range(&mut self, start: Mark, end: Mark, _: GetMode) {
+        self.out.extend_from_slice(&self.tr.data[start.pos..end.pos]);
+    }
     pub fn finish(mut self) {
         self.tr.splices.push(Splice {
             pos: self.pos,
@@ -62,7 +65,7 @@ impl<'x, 'a: 'x> TTWriter<'x, 'a> {
 pub struct TTReader<'a> {
     data: &'a [u8],
     lexer: Lexer<'a>,
-    storage: &'a UnsafeCell<Storage>,
+    pub storage: &'a UnsafeCell<Storage>,
     splices: Vec<Splice>,
 }
 impl<'a> TTReader<'a> {
@@ -102,17 +105,11 @@ impl<'a> TTReader<'a> {
         Mark { pos: self.lexer.pos() }
     }
     pub fn delete_mark_range(&mut self, start: Mark, end: Mark) {
+        if start.pos == end.pos { return; }
         self.splices.push(Splice {
             pos: start.pos,
             len: end.pos - start.pos,
             new: Vec::new(),
-        });
-    }
-    pub fn copy_from_mark_range(&mut self, start: Mark, end: Mark, _: GetMode) {
-        self.splices.push(Splice {
-            pos: self.lexer.pos(),
-            len: 0,
-            new: self.data[start.pos..end.pos].to_owned(),
         });
     }
     pub fn mutate_ident<F>(&mut self, mark: Mark, f: F) where F: FnOnce(Ident) -> OutIdent {
@@ -123,6 +120,7 @@ impl<'a> TTReader<'a> {
             _ => unreachable!(),
         };
         let new = f(ident);
+        if lexer_copy.pos() == mark.pos { return; }
         self.splices.push(Splice {
             pos: mark.pos,
             len: lexer_copy.pos() - mark.pos,
@@ -130,10 +128,31 @@ impl<'a> TTReader<'a> {
         });
     }
     pub fn writer<'x>(&'x mut self) -> TTWriter<'x, 'a> {
+        let pos = self.lexer.pos();
         TTWriter {
             tr: self,
-            pos: self.lexer.pos(),
+            pos: pos,
             out: Vec::new(),
+        }
+    }
+    pub fn output(&mut self) -> Option<Vec<u8>> {
+        if self.splices.is_empty() {
+            None
+        } else {
+            self.splices.sort_by_key(|splice| splice.pos);
+            let mut pos = 0;
+            let mut out = Vec::with_capacity(self.data.len() +
+                                             self.splices.iter()
+                                                .map(|s| s.new.len())
+                                                .sum::<usize>());
+            for splice in &self.splices {
+                assert!(pos <= splice.pos);
+                out.extend_from_slice(&self.data[pos..splice.pos]);
+                out.extend_from_slice(&splice.new);
+                pos = splice.pos + splice.len;
+            }
+            out.extend_from_slice(&self.data[pos..]);
+            Some(out)
         }
     }
 }
