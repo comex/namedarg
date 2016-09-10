@@ -1,10 +1,10 @@
-use {GetMode, SpanToken, Storage};
-use syntax::parse::token;
-use syntax::ast::Ident;
-use syntax::parse::token::Token;
-use syntax::tokenstream::{TokenTree, Delimited};
-use syntax_pos;
-use syntax_pos::Span;
+use super::{GetMode, SpanToken, Storage};
+use super::syntax::parse::token;
+use super::syntax::ast::Ident;
+use super::syntax::parse::token::Token;
+use super::syntax::tokenstream::{TokenTree, Delimited};
+use super::syntax_pos;
+use super::syntax_pos::Span;
 use std::mem::replace;
 use std::rc::Rc;
 use std::cell::UnsafeCell;

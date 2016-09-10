@@ -7,7 +7,7 @@ use std::str;
 extern crate rustc_macro;
 use rustc_macro::TokenStream;
 
-#[path = "../../namedarg_plugin/src/lib.rs"]
+#[path = "../../namedarg_plugin/src/main.rs"]
 mod main;
 
 use main::{Storage, TTReader, do_transform, Context, DummyExtCtxt};

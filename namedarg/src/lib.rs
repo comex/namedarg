@@ -13,3 +13,12 @@ macro_rules! namedarg {
         }
     }
 }
+
+#[cfg(feature = "nightly_mode")]
+#[macro_export]
+macro_rules! namedarg {
+    { $($stuff:tt)* } => { namedarg_plugin! { $($stuff)* } }
+}
+
+#[cfg(and(feature = "nightly_mode", feature = "macros11_mode"))]
+foo!
