@@ -1,5 +1,5 @@
-use {GetMode, SpanToken, Storage};
-use rlex::{Lexer, token, Token, DelimToken, Ident};
+use super::{GetMode, SpanToken, Storage};
+use super::rlex::{Lexer, token, Token, DelimToken, Ident};
 use std::cell::UnsafeCell;
 use std::str;
 

@@ -4,13 +4,13 @@ version = "0.1.0"
 authors = ["comex <comexk@gmail.com>"]
 
 [lib]
-rustc-macro = "true"
-path = "../namedarg_plugin/src/lib.rs"
+rustc-macro = true
 
 [dependencies]
 
 [features]
-default = ["use_rlex"]
+default = ["use_rlex", "rustc_macro_mode"]
 derive_debug = []
 println_spam = ["derive_debug"]
 use_rlex = []
+rustc_macro_mode = []

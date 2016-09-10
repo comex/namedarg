@@ -8,6 +8,20 @@ fn Pattern_White_Space(c: u32) -> bool {
     }
 }
 
+pub fn idx_before_ending_whitespace_char(s: &[u8]) -> Option<usize> {
+    let len = s.len();
+    if len == 0 { return None; }
+    match s[len - 1] {
+        0x9 ... 0xd | 0x20 => Some(len - 1),
+        0x85 if s[..len].ends_with(b"\xc2") => Some(len - 2),
+        0x8e | 0x8f | 0xa8 | 0xa9
+            if s[..len - 1].ends_with(b"\xe2\x80")
+            => Some(len - 3),
+        _ => None,
+    }
+}
+
+
 #[derive(Clone, Copy)]
 struct Reader<'a> {
     data: &'a [u8],
@@ -83,6 +97,7 @@ pub enum BinOp {
     Or,
     Star,
     Plus,
+    #[allow(dead_code)]
     Shr,
 }
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -175,13 +190,14 @@ pub enum Token {
     Literal(()),
     Lifetime(()),
     BinOp(BinOp),
+    #[allow(dead_code)]
     Dummy,
     White,
     Other,
 }
 pub mod token {
-    pub use Token::*;
-    pub use BinOp::*;
+    pub use super::Token::*;
+    pub use super::BinOp::*;
 }
 
 #[derive(Clone, Copy)]

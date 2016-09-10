@@ -8,10 +8,9 @@ macro_rules! a {
 */
 
 use std::mem::{replace, size_of, transmute};
-#[allow(unused_imports)] // XXX
-use std::cell::UnsafeCell;
 use std::slice;
 use std::ptr;
+use std::str;
 
 #[cfg(not(feature = "println_spam"))]
 macro_rules! if_println_spam { {$($stuff:tt)*} => {} }
@@ -24,17 +23,17 @@ macro_rules! if_debug_assertions { {$($stuff:tt)*} => {} }
 macro_rules! if_debug_assertions { {$($stuff:tt)*} => {$($stuff)*} }
 
 #[cfg(not(feature = "use_rlex"))]
-#[macro_export]
+#[cfg_attr(not(feature = "rustc_macro_mode"), macro_export)]
 macro_rules! if_rlex { {$($stuff:tt)*} => {} }
 #[cfg(feature = "use_rlex")]
-#[macro_export]
+#[cfg_attr(not(feature = "rustc_macro_mode"), macro_export)]
 macro_rules! if_rlex { {$($stuff:tt)*} => {$($stuff)*} }
 
 #[cfg(not(feature = "use_rlex"))]
-#[macro_export]
+#[cfg_attr(not(feature = "rustc_macro_mode"), macro_export)]
 macro_rules! if_not_rlex { {$($stuff:tt)*} => {$($stuff)*} }
 #[cfg(feature = "use_rlex")]
-#[macro_export]
+#[cfg_attr(not(feature = "rustc_macro_mode"), macro_export)]
 macro_rules! if_not_rlex { {$($stuff:tt)*} => {} }
 
 pub enum GetMode {
@@ -68,20 +67,20 @@ if_not_rlex! {
     #[macro_use]
     extern crate syntax;
     extern crate syntax_pos;
-    use rustc_plugin::registry::Registry;
+    use self::rustc_plugin::registry::Registry;
     #[allow(unused_imports)]
-    use syntax::print::pprust;
-    use syntax::parse::token;
-    use syntax::parse::token::{Token, DelimToken};
-    use syntax::parse::token::keywords;
-    use syntax::tokenstream::TokenTree;
-    use syntax::ext::base::{ExtCtxt, MacResult, MacEager};
-    use syntax_pos::Span;
-    pub use syntax::ast::Ident;
-    use syntax::util::small_vector::SmallVector;
+    use self::syntax::print::pprust;
+    use self::syntax::parse::token;
+    use self::syntax::parse::token::{Token, DelimToken};
+    use self::syntax::parse::token::keywords;
+    use self::syntax::tokenstream::TokenTree;
+    use self::syntax::ext::base::{ExtCtxt, MacResult, MacEager};
+    use self::syntax_pos::Span;
+    pub use self::syntax::ast::Ident;
+    use self::syntax::util::small_vector::SmallVector;
 
     mod ttrw_libsyntax;
-    pub use ttrw_libsyntax::{TTWriter, TTReader, Mark, InIdent, dummy_span};
+    pub use self::ttrw_libsyntax::{TTWriter, TTReader, Mark, InIdent, dummy_span};
 
     fn judge_other_token(tok: &Token) -> Judge {
         match tok {
@@ -107,10 +106,10 @@ if_not_rlex! {
 }
 if_rlex! {
     mod rlex;
-    pub use rlex::{Ident, BinOp, DelimToken, Token, token, keywords};
+    pub use self::rlex::{Ident, BinOp, DelimToken, Token, token, keywords};
 
     mod ttrw_rlex;
-    pub use ttrw_rlex::{TTWriter, TTReader, Mark, InIdent, Span, dummy_span};
+    pub use self::ttrw_rlex::{TTWriter, TTReader, Mark, InIdent, Span, dummy_span};
 
     fn judge_other_token(tok: &Token) -> Judge {
         match tok {
@@ -134,7 +133,7 @@ fn mutate_name(fn_name: &str, arg_names: &mut Iterator<Item=Option<&str>>, ctx: 
     let mut name: String = fn_name.to_owned();
     let olen = name.len();
     if ctx.use_valid_idents {
-        name.push_str("__lbl");
+        name.push_str("_labeledargs");
     } else {
         name.push('{');
     }
@@ -142,10 +141,10 @@ fn mutate_name(fn_name: &str, arg_names: &mut Iterator<Item=Option<&str>>, ctx: 
     while let Some(arg_name) = arg_names.next() {
         if ctx.use_valid_idents {
             if let Some(arg_name) = arg_name {
-                name.push_str("__");
+                name.push_str("_");
                 name.push_str(arg_name);
             } else {
-                name.push_str("_X");
+                name.push_str("_0");
             }
         } else {
             if let Some(arg_name) = arg_name {
@@ -416,7 +415,6 @@ pub struct DeclArg {
     name: Option<InIdent>,
     ty_start: Option<Mark>,
     ty_end: Option<Mark>,
-    ty_ends_with_selfval: bool, // only used with rlex
     is_default: bool,
 }
 
@@ -499,9 +497,15 @@ fn gen_default_stub<'a>(tr: &mut TTReader<'a>, args: &[XAndCommon<DeclArg>], num
             tw.copy_from_mark_range(start, end, GetMode::InnerDepth(args_start));
             // we already wrote 'x0: ' so change self to Self
             if_rlex! { {
-                if arg.ty_ends_with_selfval {
-                    let len = tw.out.len();
-                    tw.out[len - 4] = b'S';
+                let mut slice: &mut [u8] = &mut tw.out[..];
+                while let Some(idx) = rlex::idx_before_ending_whitespace_char(&slice[..]) {
+                    slice = &mut {slice}[..idx];
+                }
+                let len = slice.len();
+                if slice.ends_with(b"self") &&
+                   (len == 4 ||
+                    rlex::idx_before_ending_whitespace_char(&slice[..len-4]).is_some()) {
+                    slice[len - 4] = b'S';
                 }
             } }
             if_not_rlex! { {
@@ -1305,7 +1309,7 @@ if_not_rlex! {
         MacEager::items(items)
     }
 
-
+    use std::cell::UnsafeCell;
     fn expand_namedarg<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree])
             -> Box<MacResult + 'static> {
         let storage = UnsafeCell::new(Storage::new());

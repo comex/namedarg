@@ -1,5 +1,6 @@
-#![feature(plugin)]
-#![plugin(namedarg)]
+#![feature(rustc_macro, custom_derive)] // for now
+#[macro_use]
+extern crate namedarg;
 namedarg! {
     use std::str::FromStr;
     use std::fmt::Debug;
