@@ -1,0 +1,27 @@
+[package]
+name = "namedarg"
+version = "0.1.0"
+authors = ["comex <comexk@gmail.com>"]
+
+[dependencies]
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["macros11_mode"]
+nightly_mode = ["namedarg_plugin"]
+macros11_mode = ["namedarg_rustc_macro"]
+
+[dependencies.namedarg_plugin]
+version = "0.1.0"
+features = []
+path = "../namedarg_plugin"
+optional = true
+
+[dependencies.namedarg_rustc_macro]
+version = "0.1.0"
+features = []
+path = "../namedarg_rustc_macro"
+optional = true
+

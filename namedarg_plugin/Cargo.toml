@@ -1,12 +1,9 @@
 [package]
-name = "namedarg"
+name = "namedarg_plugin"
 version = "0.1.0"
 authors = ["comex <comexk@gmail.com>"]
 
 [dependencies]
-
-[lib]
-crate-type = ["rlib", "dylib"]
 
 [features]
 derive_debug = []
