@@ -1,6 +1,6 @@
 #![cfg_attr(not(feature = "force_macros11_mode"), feature(rustc_private))]
 
-#[path = "../../common/main.rs"]
+#[path = "../../namedarg_rustc_macro/src/main.rs"]
 mod main;
 
 use std::time::Duration;

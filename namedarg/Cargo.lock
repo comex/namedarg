@@ -1,0 +1,18 @@
+[root]
+name = "namedarg"
+version = "0.1.0"
+dependencies = [
+ "namedarg_rustc_macro 0.1.0",
+]
+
+[[package]]
+name = "namedarg_hack"
+version = "0.1.0"
+
+[[package]]
+name = "namedarg_rustc_macro"
+version = "0.1.0"
+dependencies = [
+ "namedarg_hack 0.1.0",
+]
+

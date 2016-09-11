@@ -2,14 +2,16 @@
 name = "namedarg_rustc_macro"
 version = "0.1.0"
 authors = ["comex <comexk@gmail.com>"]
+build = "../common-build/set-feature-unless-nightly.rs"
 
 [lib]
 rustc-macro = true
 
-[dependencies]
+[dependencies.namedarg_hack]
+version = "0.1.0"
+path = "../namedarg_hack"
 
 [features]
-default = ["force_macros11_mode"]
 force_macros11_mode = []
 derive_debug = []
 println_spam = ["derive_debug"]
