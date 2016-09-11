@@ -1,15 +1,15 @@
 [package]
-name = "namedarg_rustc_macro"
+name = "namedarg_test_file"
 version = "0.1.0"
 authors = ["comex <comexk@gmail.com>"]
 
-[lib]
-rustc-macro = true
+[[bin]]
+name = "test_file"
+path = "src/test_file.rs"
 
 [dependencies]
 
 [features]
-default = ["force_macros11_mode"]
-force_macros11_mode = []
 derive_debug = []
 println_spam = ["derive_debug"]
+force_macros11_mode = []

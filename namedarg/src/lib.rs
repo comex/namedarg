@@ -1,7 +1,7 @@
-#![cfg_attr(feature = "nightly_mode", feature(plugin))]
-#![cfg_attr(feature = "nightly_mode", plugin(namedarg_plugin))]
+#![cfg_attr(not(feature = "force_macros11_mode"), feature(plugin))]
+#![cfg_attr(not(feature = "force_macros11_mode"), plugin(namedarg_plugin))]
 
-#[cfg(feature = "macros11_mode")]
+#[cfg(feature = "force_macros11_mode")]
 #[macro_export]
 macro_rules! namedarg {
     { $($stuff:tt)* } => {
@@ -14,11 +14,15 @@ macro_rules! namedarg {
     }
 }
 
-#[cfg(feature = "nightly_mode")]
+#[cfg(not(feature = "force_macros11_mode"))]
 #[macro_export]
 macro_rules! namedarg {
-    { $($stuff:tt)* } => { namedarg_plugin! { $($stuff)* } }
+    { $($stuff:tt)* } => {
+        include!("/tmp/wtf.rs");
+        mod A {
+            #![feature(plugin)]
+            #![plugin(asdf)]
+        }
+        //_namedarg_plugin! { $($stuff)* }
+    }
 }
-
-#[cfg(and(feature = "nightly_mode", feature = "macros11_mode"))]
-foo!

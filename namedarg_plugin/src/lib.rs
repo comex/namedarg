@@ -1,4 +1,3 @@
-#![feature(plugin_registrar, rustc_private)]
 extern crate rustc_plugin;
 #[macro_use]
 extern crate syntax;
@@ -11,6 +10,7 @@ use self::syntax::parse::token;
 use self::syntax::tokenstream::TokenTree;
 use self::syntax::util::small_vector::SmallVector;
 
+#[path = "../../common/main.rs"]
 mod main;
 use main::*;
 
@@ -30,7 +30,7 @@ fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
 }
 
 use std::cell::UnsafeCell;
-fn expand_namedarg<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree])
+fn expand_namedarg_plugin<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree])
         -> Box<MacResult + 'static> {
     let storage = UnsafeCell::new(Storage::new());
     let mut tr = TTReader::new(args, &storage);
@@ -43,8 +43,17 @@ fn expand_namedarg<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree]
     passthrough_items(cx, output)
 }
 
+/*
+fn expand_namedarg_unscopeme<'a, 'b>(cx: &'a mut ExtCtxt, _sp: Span, args: &'b [TokenTree])
+        -> Box<MacResult + 'static> {
+    cx.syntax_env.insert(
+    MacEager::items(SmallVector::zero())
+}
+*/
+
 
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
-    reg.register_macro("namedarg_plugin", expand_namedarg);
+    reg.register_macro("_namedarg_plugin", expand_namedarg_plugin);
+    //reg.register_macro("_namedarg_unscopeme", expand_namedarg_unscopeme);
 }

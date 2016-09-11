@@ -2,13 +2,15 @@
 name = "namedarg_plugin"
 version = "0.1.0"
 authors = ["comex <comexk@gmail.com>"]
+build = "../common-build/set-feature-unless-nightly.rs"
 
 [lib]
 crate_type = ["dylib"]
+path = "src/stub.rs"
 
 [dependencies]
 
 [features]
+force_macros11_mode = []
 derive_debug = []
 println_spam = ["derive_debug"]
-use_rlex = []

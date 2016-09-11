@@ -1,22 +1,24 @@
-#![feature(rustc_private)]
-#[allow(plugin_as_library)]
-#[macro_use]
-extern crate namedarg;
-use namedarg::{Storage, TTReader, do_transform, Context};
-extern crate syntax;
-use std::cell::UnsafeCell;
-use std::io::{Read, Write};
-use std::time::{Instant, Duration};
+#![cfg_attr(not(feature = "force_macros11_mode"), feature(rustc_private))]
 
-fn nanos(d: Duration) -> u64 { d.as_secs() * 1000000000u64 + (d.subsec_nanos() as u64) }
+#[path = "../../common/main.rs"]
+mod main;
 
-if_rlex! {
-    use namedarg::DummyExtCtxt;
+use std::time::Duration;
+pub fn nanos(d: Duration) -> u64 { d.as_secs() * 1000000000u64 + (d.subsec_nanos() as u64) }
+
+#[cfg(feature = "force_macros11_mode")]
+mod m {
+    use std;
+    use std::cell::UnsafeCell;
+    use std::io::{Read, Write};
+    use std::time::Instant;
+    use main::{Storage, TTReader, do_transform, Context};
+    use main::DummyExtCtxt;
     fn write_to_file(filename: &str, what: &[u8]) {
         std::fs::File::create(filename).unwrap().write_all(what).unwrap();
     }
 
-    fn main() {
+    pub fn main() {
         let filename = std::env::args().nth(1).unwrap();
         let mut source: Vec<u8> = Vec::new();
         std::fs::File::open(&filename).unwrap().read_to_end(&mut source).unwrap();
@@ -34,7 +36,7 @@ if_rlex! {
             do_transform(&mut tr, &mut ctx);
         }
         let time_2 = Instant::now();
-        println!("transform:{}", nanos(time_2 - time_1));
+        println!("transform:{}", ::nanos(time_2 - time_1));
         let output = tr.output();
         if let Some(output) = output {
             println!("{}: we transformed :( writing to /tmp/pp[ab]", filename);
@@ -48,17 +50,25 @@ if_rlex! {
         }
         println!("ok");
     }
-
 }
-if_not_rlex! {
-    use syntax::print::pprust;
-    use syntax::parse::{ParseSess, filemap_to_tts};
-    use syntax::tokenstream::TokenTree;
+
+#[cfg(not(feature = "force_macros11_mode"))]
+mod m {
+    //#![feature(rustc_private)]
+    use std;
+    use std::cell::UnsafeCell;
+    use std::io::{Read, Write};
+    use std::time::Instant;
+    use main::{Storage, TTReader, do_transform, Context};
+    extern crate syntax;
+    use self::syntax::print::pprust;
+    use self::syntax::parse::{ParseSess, filemap_to_tts};
+    use self::syntax::tokenstream::TokenTree;
     fn write_to_file(filename: &str, what: &str) {
         std::fs::File::create(filename).unwrap().write_all(what.as_bytes()).unwrap();
     }
 
-    fn main() {
+    pub fn main() {
         let filename = std::env::args().nth(1).unwrap();
         let mut source = String::new();
         std::fs::File::open(&filename).unwrap().read_to_string(&mut source).unwrap();
@@ -76,7 +86,7 @@ if_not_rlex! {
             do_transform(&mut tr, &mut ctx);
         }
         let time_2 = Instant::now();
-        println!("parse:{} transform:{}", nanos(time_1 - time_0), nanos(time_2 - time_1));
+        println!("parse:{} transform:{}", ::nanos(time_1 - time_0), ::nanos(time_2 - time_1));
         if tr.output.is_some() {
             println!("{}: we transformed :( writing to /tmp/pp[ab]", filename);
             write_to_file("/tmp/ppa", &pprust::tts_to_string(&tts));
@@ -89,4 +99,8 @@ if_not_rlex! {
         }
         println!("ok");
     }
+}
+
+fn main() {
+    m::main()
 }
