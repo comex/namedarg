@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "force_macros11_mode"), feature(rustc_private))]
 
-#[path = "../../namedarg_rustc_macro/src/main.rs"]
-mod main;
+#[path = "../../namedarg_rustc_macro/src/namedarg.rs"]
+mod namedarg;
 
 use std::time::Duration;
 pub fn nanos(d: Duration) -> u64 { d.as_secs() * 1000000000u64 + (d.subsec_nanos() as u64) }
@@ -13,8 +13,8 @@ mod m {
     use std::io::{Read, Write};
     use std::time::Instant;
     use std::str;
-    use main::{Storage, TTReader, do_transform, Context};
-    use main::DummyExtCtxt;
+    use namedarg::{Storage, TTReader, do_transform, Context};
+    use namedarg::DummyExtCtxt;
     fn write_to_file(filename: &str, what: &[u8]) {
         std::fs::File::create(filename).unwrap().write_all(what).unwrap();
     }
@@ -76,7 +76,7 @@ mod m {
     use std::cell::UnsafeCell;
     use std::io::{Read, Write};
     use std::time::Instant;
-    use main::{Storage, TTReader, do_transform, Context};
+    use namedarg::{Storage, TTReader, do_transform, Context};
     extern crate syntax;
     use self::syntax::print::pprust;
     use self::syntax::parse::{ParseSess, filemap_to_tts};

@@ -2,14 +2,12 @@ import sys, re, os, subprocess
 version = sys.argv[1]
 crates_to_include = ['namedarg_hack', 'namedarg_rustc_macro', 'namedarg']
 main_crate = 'namedarg'
-check_git_clean = False
+check_git_clean = True
 
-crate_paths = [os.path.realpath(crate) for crate in crates_to_include]
-subprocess.check_call('rm -rf release-tmp', shell=True)
-os.mkdir('release-tmp')
-os.mkdir('release-tmp/.cargo')
-cargo_config = 'paths = [%s]' % ', '.join('"%s"' % path for path in crate_paths)
-open('release-tmp/.cargo/config', 'w').write(cargo_config)
+if check_git_clean:
+    status = subprocess.check_output('git status --porcelain', shell=True).strip()
+    if status != '':
+        raise Exception('git not clean:\n' + status)
 
 existing = subprocess.check_output('git tag -l %s' % version, shell=True).strip()
 if existing:
@@ -23,10 +21,6 @@ print '   git checkout master && git reset --hard %s' % head
 print '   git tag -d %s' % version
 print
 
-if check_git_clean:
-    status = subprocess.check_output('git status --porcelain', shell=True).strip()
-    if status != '':
-        raise Exception('git not clean:\n' + status)
 def sub(a, b, data, must_sub=True):
     if must_sub and not re.search(a, data):
         raise Exception("couldn't replace %r with %r in:\n%s" % (a, b, data))
@@ -44,9 +38,10 @@ for crate in crates_to_include:
     with open(cargo_toml, 'w') as fp:
         fp.write(data)
 
-print 'cd release-tmp'
-os.chdir('release-tmp')
+subprocess.check_call('git commit --allow-empty -a -m "[auto] %s"' % version, shell=True)
+subprocess.check_call('git tag %s' % version, shell=True)
+
 for crate in crates_to_include:
-    cmd = 'cargo publish --dry-run --allow-dirty --manifest-path ../%s/Cargo.toml' % crate
+    cmd = 'cargo publish --manifest-path %s/Cargo.toml' % crate
     print '>>', cmd
     subprocess.check_call(cmd, shell=True)

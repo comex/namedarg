@@ -12,7 +12,7 @@ use self::syntax::util::small_vector::SmallVector;
 
 use std::cell::UnsafeCell;
 
-use main::*;
+use namedarg::*;
 
 fn passthrough_items(cx: &mut ExtCtxt, args: &[TokenTree])
     -> Box<MacResult + 'static> {

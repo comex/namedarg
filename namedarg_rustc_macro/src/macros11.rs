@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::str::FromStr;
 use std::str;
 use rustc_macro::TokenStream;
-use main::{Storage, TTReader, do_transform, Context, DummyExtCtxt};
+use namedarg::{Storage, TTReader, do_transform, Context, DummyExtCtxt};
 
 #[rustc_macro_derive(_namedarg_fake_derive)]
 pub fn namedarg_fake_derive(input: TokenStream) -> TokenStream {

@@ -5,7 +5,7 @@
    plugin(namedarg_hack))]
 #![feature(rustc_macro, rustc_macro_lib)]
 extern crate rustc_macro;
-mod main;
+mod namedarg;
 
 #[cfg(feature = "force_macros11_mode")]
 include!("macros11.rs");
