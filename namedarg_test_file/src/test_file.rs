@@ -12,6 +12,7 @@ mod m {
     use std::cell::UnsafeCell;
     use std::io::{Read, Write};
     use std::time::Instant;
+    use std::str;
     use main::{Storage, TTReader, do_transform, Context};
     use main::DummyExtCtxt;
     fn write_to_file(filename: &str, what: &[u8]) {
@@ -19,16 +20,32 @@ mod m {
     }
 
     pub fn main() {
-        let filename = std::env::args().nth(1).unwrap();
+        let mut filename: Option<String> = None;
+        let mut tokens: bool = false;
+        for arg in std::env::args().skip(1) {
+            if arg == "--tokens" {
+                tokens = true;
+            } else if filename.is_some() {
+                panic!("too many arguments");
+            } else {
+                filename = Some(arg);
+            }
+        }
+        let filename = filename.expect("no filename");
         let mut source: Vec<u8> = Vec::new();
         std::fs::File::open(&filename).unwrap().read_to_end(&mut source).unwrap();
         let cx = DummyExtCtxt::new();
         let storage = UnsafeCell::new(Storage::new());
         let mut tr = TTReader::new(&source, &storage);
-        if false {
+        if tokens {
+            let mut prev_pos = 0;
             while let Some(st) = tr.next() {
-                println!("{}:{} {:?}", st.span.line, st.span.col, st.token);
+                println!(">| {}", str::from_utf8(&source[prev_pos..st.span.pos]).unwrap());
+                println!("{}:{} {:?}",
+                         st.span.line, st.span.col, st.token);
+                prev_pos = st.span.pos;
             }
+            return;
         }
         let time_1 = Instant::now();
         {

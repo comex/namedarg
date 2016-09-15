@@ -2,15 +2,17 @@
 name = "namedarg"
 version = "0.1.0"
 authors = ["comex <comexk@gmail.com>"]
-build = "../common-build/set-feature-unless-nightly.rs"
+description = "namedarg main package"
+repository = "https://github.com/comex/namedarg"
+license = "MIT"
 
 [lib]
 crate-type = ["rlib"]
 
 [features]
-force_macros11_mode = []
+force_macros11_mode = ["namedarg_rustc_macro/force_macros11_mode"]
 
 [dependencies.namedarg_rustc_macro]
-version = "0.1.0"
+version = "= 0.1.0"
 path = "../namedarg_rustc_macro"
 

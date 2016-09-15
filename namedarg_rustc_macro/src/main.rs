@@ -580,6 +580,7 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
         xac.x.to_state()
     } } }
     pushx!(VariantData::ExcessCloses);
+    delim_depth += 1;
     st = st_or_return!();
     'outer_loop: loop {
         macro_rules! continue_next {

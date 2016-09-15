@@ -1,3 +1,4 @@
+// TODO shebang
 use std::str;
 #[allow(non_snake_case)]
 fn Pattern_White_Space(c: u32) -> bool {
@@ -97,7 +98,7 @@ pub enum BinOp {
     Or,
     Star,
     Plus,
-    #[allow(dead_code)]
+    Shl,
     Shr,
 }
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -209,6 +210,7 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(data: &'a [u8]) -> Self {
+        let data = Lexer::skip_shebang(data);
         Lexer {
             read: Reader::new(data),
             lineno: 1,
@@ -219,27 +221,41 @@ impl<'a> Lexer<'a> {
         self.lineno += 1;
         self.line_start_pos = self.pos();
     }
-    fn scan_quoted_char(&mut self) {
+    fn scan_quoted_char(&mut self) -> bool {
         match self.read.cur {
-            b'\\' => loop {
+            b'\\' => {
+                self.read.advance();
                 match self.read.next() {
-                    b'\r' => { continue; },
-                    b'\n' => { self.bump_lineno(); continue; },
+                    b'\r' => { return false; },
+                    b'\n' => { self.bump_lineno(); return false; },
                     b'x' => { self.read.advance_n(2); },
                     b'u' => {
-                        if self.read.next() != b'{' { return; }
-                        while self.read.next() != b'}' {}
+                        if self.read.next() != b'{' { return true; }
+                        while self.read.next() != b'}' &&
+                              !self.read.at_eof() {}
                     },
                     _ => (),
                 }
-                break;
             },
-            b'\x00' ... b'\x7f' => { self.read.advance() },
+            b'\n' => { self.bump_lineno(); self.read.advance(); },
+            b'\x00' ... b'\x7f' => { self.read.advance(); },
             _ => { self.read.next_utf8(); },
         }
+        true
+    }
+    fn skip_shebang(data: &[u8]) -> &[u8] {
+        if data.len() > 2 &&
+           data[0] == b'#' && data[1] == b'!' && data[2] != b'[' {
+            if let Some(pos) = data.iter().position(|&c| c == b'\n') {
+                return &data[pos+1..];
+            }
+        }
+        data
     }
     fn scan_singlequote(&mut self) -> Token {
-        self.scan_quoted_char();
+        while !self.scan_quoted_char() {
+            if self.read.at_eof() { return Token::Eof; }
+        }
         if self.read.cur == b'\'' {
             self.read.advance();
             Token::Literal(())
@@ -256,7 +272,23 @@ impl<'a> Lexer<'a> {
         Token::Literal(())
     }
     fn scan_slashstar_comment(&mut self) {
-        panic!()
+        self.read.advance();
+        let mut level = 0u32;
+        loop {
+            match self.read.next() {
+                b'/' if self.read.cur == b'*' => {
+                    self.read.advance();
+                    level += 1;
+                },
+                b'*' if self.read.cur == b'/' => {
+                    self.read.advance();
+                    level -= 1;
+                    if level == 0 { return; }
+                },
+                b'\0' if self.read.at_eof() => { return; },
+                _ => (),
+            }
+        }
     }
     fn skip_to_nl(&mut self) {
         while self.read.next() != b'\n' && !self.read.at_eof() {}
@@ -287,7 +319,6 @@ impl<'a> Lexer<'a> {
         let pos = self.read.pos_of_cur();
         let c = self.read.next_utf8();
         if Pattern_White_Space(c) {
-            if c == (b'\n' as u32) { self.bump_lineno(); }
             return Token::White;
         }
         // assume it's an ident
@@ -316,6 +347,14 @@ impl<'a> Lexer<'a> {
             },
             b'#' => Token::Pound,
             b'!' => Token::Not,
+            b'<' if self.read.cur == b'<' => {
+                self.read.advance();
+                Token::BinOp(BinOp::Shl)
+            },
+            b'>' if self.read.cur == b'>' => {
+                self.read.advance();
+                Token::BinOp(BinOp::Shr)
+            },
             b'<' => Token::Lt,
             b'>' => Token::Gt,
             b',' => Token::Comma,
