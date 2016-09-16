@@ -129,20 +129,22 @@ fn mutate_name(fn_name: &str, arg_names: &mut Iterator<Item=Option<&str>>, ctx: 
     }
     let mut any = false;
     while let Some(arg_name) = arg_names.next() {
-        if ctx.use_valid_idents {
-            if let Some(arg_name) = arg_name {
-                name.push_str("_");
-                name.push_str(arg_name);
+        any = any || arg_name.is_some();
+        if any {
+            if ctx.use_valid_idents {
+                if let Some(arg_name) = arg_name {
+                    name.push_str("_");
+                    name.push_str(arg_name);
+                } else {
+                    name.push_str("_0");
+                }
             } else {
-                name.push_str("_0");
+                if let Some(arg_name) = arg_name {
+                    name.push_str(arg_name);
+                }
+                name.push(':');
             }
-        } else {
-            if let Some(arg_name) = arg_name {
-                name.push_str(arg_name);
-            }
-            name.push(':');
         }
-        any = true;
     }
     if !any {
         // if all arguments defaulted, use an untransformed ident
