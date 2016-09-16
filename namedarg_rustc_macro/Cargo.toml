@@ -1,6 +1,6 @@
 [package]
 name = "namedarg_rustc_macro"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["comex <comexk@gmail.com>"]
 description = "namedarg main package"
 repository = "https://github.com/comex/namedarg"
@@ -11,7 +11,7 @@ build = "common-build/set-feature-unless-nightly.rs"
 rustc-macro = true
 
 [dependencies.namedarg_hack]
-version = "= 0.1.0"
+version = "= 0.1.1"
 path = "../namedarg_hack"
 
 [features]
