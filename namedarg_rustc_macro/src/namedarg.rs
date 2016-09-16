@@ -123,7 +123,7 @@ fn mutate_name(fn_name: &str, arg_names: &mut Iterator<Item=Option<&str>>, ctx: 
     let mut name: String = fn_name.to_owned();
     let olen = name.len();
     if ctx.use_valid_idents {
-        name.push_str("_labeledargs");
+        name.push_str("_namedargs");
     } else {
         name.push('{');
     }
