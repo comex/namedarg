@@ -45,3 +45,4 @@ for crate in crates_to_include:
     cmd = 'cargo publish --manifest-path %s/Cargo.toml' % crate
     print '>>', cmd
     subprocess.check_call(cmd, shell=True)
+    subprocess.check_call('sleep 3', shell=True) # ... without this i've had later publishes fail to see earlier ones
