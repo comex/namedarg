@@ -2,6 +2,7 @@
 name = "namedarg_test_file"
 version = "0.1.0"
 authors = ["comex <comexk@gmail.com>"]
+build = "common-build/set-feature-unless-nightly.rs"
 
 [[bin]]
 name = "test_file"

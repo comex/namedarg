@@ -9,10 +9,9 @@ fn main() {
     if !op.status.success() {
         panic!("$RUSTC --version failed - {:?}", op.status);
     }
-    // note that this refers to the release channel - it doesn't have to literally be a nightly,
-    // self-built should output the same
-    let is_nightly = op.stdout.windows(9).any(|w| w == b"-nightly ");
-
+    let stdout = String::from_utf8_lossy(&op.stdout);
+    // note that this refers to the release channel
+    let is_nightly = stdout.contains("-nightly "); || stdout.contains("-dev ");
     if !is_nightly {
         println!("cargo:rustc-cfg=feature = \"force_macros11_mode\"");
     }
