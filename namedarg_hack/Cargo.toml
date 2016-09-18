@@ -1,6 +1,6 @@
 [package]
 name = "namedarg_hack"
-version = "0.1.2"
+version = "0.1.3"
 authors = ["comex <comexk@gmail.com>"]
 description = "namedarg main package"
 repository = "https://github.com/comex/namedarg"
