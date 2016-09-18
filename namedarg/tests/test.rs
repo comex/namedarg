@@ -66,5 +66,7 @@ namedarg! {
         let xs = [1, 2, 3];
         let res = xs.into_iter().fold(0, |a: usize, &b: &usize| 10 * a + b);
         assert_eq!(res, 123);
+        assert_eq!(r###"huh?" foo(a: b) "huh?"###,
+                   "huh?\" foo(a: b) \"huh?");
     }
 }

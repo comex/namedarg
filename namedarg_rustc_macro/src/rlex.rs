@@ -72,8 +72,8 @@ impl<'a> Reader<'a> {
         }
         chr
     }
-    fn rewind(&mut self) {
-        self.pos -= 1;
+    fn rewind_to(&mut self, to: usize) {
+        self.pos = to;
         assert!(self.pos >= 1);
         self.cur = self.data[self.pos - 1];
     }
@@ -271,6 +271,35 @@ impl<'a> Lexer<'a> {
         self.read.advance();
         Token::Literal(())
     }
+    fn maybe_scan_rawquote(&mut self, mut c: u8) -> Option<Token> {
+        if c == b'b' {
+            c = self.read.next();
+        }
+        if c != b'r' {
+            return None;
+        }
+        let mut pounds: u32 = 0;
+        while self.read.cur == b'#' {
+            pounds += 1;
+            self.read.advance();
+        }
+        if self.read.next() != b'"' {
+            return None;
+        }
+        let mut closing_pounds: Option<u32> = None;
+        loop {
+            match self.read.next() {
+                b'"' => closing_pounds = Some(0),
+                b'#' => if let Some(cp) = closing_pounds {
+                    closing_pounds = Some(cp + 1);
+                    if cp + 1 == pounds { break; }
+                },
+                b'\0' if self.read.at_eof() => break,
+                _ => (),
+            }
+        }
+        Some(Token::Literal(()))
+    }
     fn scan_slashstar_comment(&mut self) {
         self.read.advance();
         let mut level = 0u32;
@@ -315,7 +344,8 @@ impl<'a> Lexer<'a> {
         }
     }
     fn next_unicode(&mut self) -> Token {
-        self.read.rewind();
+        let pos = self.read.pos - 1; // ugh, lexical lifetimes
+        self.read.rewind_to(pos);
         let pos = self.read.pos_of_cur();
         let c = self.read.next_utf8();
         if Pattern_White_Space(c) {
@@ -378,6 +408,15 @@ impl<'a> Lexer<'a> {
             b'}' => Token::CloseDelim(DelimToken::Brace),
             b'\'' => self.scan_singlequote(),
             b'"' => self.scan_doublequote(),
+            c @ b'b' | c @ b'r' => {
+                let start = self.read.pos - 1;
+                if let Some(tok) = self.maybe_scan_rawquote(c) {
+                    tok
+                } else {
+                    self.read.rewind_to(start);
+                    self.scan_ident(start - 1)
+                }
+            },
             b'|' => Token::BinOp(BinOp::Or),
             b'&' => Token::BinOp(BinOp::And),
             b'*' => Token::BinOp(BinOp::Star),
