@@ -1,3 +1,5 @@
+![crates.io badge](https://img.shields.io/crates/v/namedarg.svg)
+
 # Named arguments for Rust
 
 An **experimental** (probably broken) procedural macro.  Instead of code like this:
