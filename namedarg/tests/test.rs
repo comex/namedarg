@@ -1,4 +1,6 @@
 #![feature(rustc_macro, custom_derive)] // for now
+#![cfg_attr(not(feature = "force_macros11_mode"),
+            feature(type_ascription))]
 #[macro_use]
 extern crate namedarg;
 namedarg! {
@@ -61,6 +63,7 @@ namedarg! {
         assert_eq!(test_ref_pattern(a: &1), 1);
     }
 
+    #[allow(dead_code)]
     #[test]
     fn test_untransformed() {
         let xs = [1, 2, 3];
@@ -68,5 +71,17 @@ namedarg! {
         assert_eq!(res, 123);
         assert_eq!(r###"huh?" foo(a: b) "huh?"###,
                    "huh?\" foo(a: b) \"huh?");
+        struct X { a: usize }
+        fn ignore<T>(_: T) {}
+        ignore({struct Y { a: usize } 5});
+        ignore(X { a: 5 });
+    }
+    #[cfg(not(feature = "force_macros11_mode"))]
+    #[test]
+    fn test_type_ascription() {
+        fn ignore<T>(_: T) {}
+        ignore(5: usize);
+        let a = 5;
+        ignore((a: usize));
     }
 }

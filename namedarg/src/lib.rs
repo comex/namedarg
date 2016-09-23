@@ -9,3 +9,13 @@ macro_rules! namedarg {
         }
     }
 }
+
+#[macro_export]
+macro_rules! namedarg_inner {
+    { $($stuff:tt)* } => {
+        #[derive(_namedarg_fake_derive)]
+        enum _namedarg_fake_enum {
+            a = _namedarg_body!({$($stuff)*})
+        }
+    }
+}
