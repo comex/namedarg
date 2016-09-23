@@ -1,6 +1,6 @@
 # Named arguments for Rust
 
-An **experimental** procedural macro.  Instead of code like this:
+An **experimental** (probably broken) procedural macro.  Instead of code like this:
 ```rust
 parser.parse_item(vec![], true, false)
 ```
