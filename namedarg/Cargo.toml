@@ -1,6 +1,6 @@
 [package]
 name = "namedarg"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["comex <comexk@gmail.com>"]
 description = "namedarg main package"
 repository = "https://github.com/comex/namedarg"
@@ -13,6 +13,6 @@ crate-type = ["rlib"]
 force_macros11_mode = ["namedarg_rustc_macro/force_macros11_mode"]
 
 [dependencies.namedarg_rustc_macro]
-version = "= 0.1.4"
+version = "= 0.1.5"
 path = "../namedarg_rustc_macro"
 
