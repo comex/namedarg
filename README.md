@@ -172,7 +172,7 @@ cannot be given types, but even then there's usually a better way to write it.
 
 Add this to your Cargo.toml:
 
-```
+```toml
 [dependencies]
 namedarg = "0.1"
 namedarg_rustc_macro = "0.1"
@@ -203,7 +203,7 @@ stable this way.
 
 You can force macros 1.1 mode on using a Cargo feature:
 
-```
+```toml
 [dependencies.namedarg]
 version = "0.1"
 features = ["force_macros11_mode"]
