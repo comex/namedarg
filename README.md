@@ -24,7 +24,7 @@ latter is the name of the resulting variable.
 In fact, the declaration syntax is quite similar to Swift, but with two forms
 swapped around:
 
-| Type             | Rust                      | Swift                       | Called as            | Variable name |
+| Variant          | Rust                      | Swift                       | Called as            | Variable name |
 | ---              | ---                       | ---                         | ---                  | ---           |
 | Unnamed          | `fn foo(bar: String)`     | `func foo(_ bar: String)`   | `foo(string)`        | `bar`         |
 | Basic named      | `fn foo(_ bar: String)`   | `func foo(bar: String)`     | `foo(bar: string)`   | `bar`         |
@@ -192,11 +192,16 @@ namedarg! {
 
 Yeah, it's a little ugly.  Once macros 1.1 is stabilized, the first line can be omitted.
 
-Macros 1.1 mode is automatically enabled if a **non-nightly** rustc is
+"Macros 1.1" mode is automatically enabled if a **non-nightly** rustc is
 detected, although at time of writing this is useless because it is not
 actually stable yet.  It has the *sliight* downside of **breaking line
 numbering for everything inside `namedarg!`**, which is inherent in the design
-of macros 1.1.
+of macros 1.1.  Like, all errors will show up pointing to the line containing
+`namedarg!`.  Not exactly usable for development, but it should be possible
+(post stabilization) to develop a crate on nightly and have it still compile on
+stable this way.
+
+You can force macros 1.1 mode on using a Cargo feature:
 
 ```
 [dependencies.namedarg]
