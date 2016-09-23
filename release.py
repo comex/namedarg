@@ -1,4 +1,4 @@
-import sys, re, os, subprocess
+import sys, re, os, subprocess, time
 version = sys.argv[1]
 crates_to_include = ['namedarg_hack', 'namedarg_rustc_macro', 'namedarg']
 main_crate = 'namedarg'
