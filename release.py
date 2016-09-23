@@ -41,9 +41,12 @@ for crate in crates_to_include:
 subprocess.check_call('git commit --allow-empty -a -m "[auto] %s"' % version, shell=True)
 subprocess.check_call('git tag %s' % version, shell=True)
 
-for crate in crates_to_include:
+for i, crate in enumerate(crates_to_include):
+    if i != 0:
+        time.sleep(3) # ... without this i've had later publishes fail to see earlier ones
     cmd = 'cargo publish --manifest-path %s/Cargo.toml' % crate
     print '>>', cmd
     subprocess.check_call(cmd, shell=True)
     print '>> sleeping'
-    time.sleep(3) # ... without this i've had later publishes fail to see earlier ones
+
+print 'done!'
