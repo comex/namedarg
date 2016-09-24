@@ -69,15 +69,21 @@ function name**, at both definitions and call sites.  As a natural consequence:
   (Note: different numbers of unnamed arguments can also be distinguished, but
   only after the first named argument.)
 
+
 - Named argument syntax works both for bare fns and trait methods (in both
   trait definitions and impls).  But it doesn't work in either lambdas or
   function *types* (either bare `fn(...)` or the `Fn/FnMut/FnOnce(...)`
   traits); the type drops argument names.
 
-  (Currently there is no way to reference by value a function with named
-  arguments; this should be rectified in the future.  But if you could, you
-  could, for example, cast a function defined as `fn foo(bar: u32)` to
-  `fn(u32)`.)
+  To **name** a function with named arguments without calling it, use this
+  syntax (loosely inspired by Objective-C):
+  | Called as                   | Named as
+  | ---                         | ---
+  | `foo()` / `foo(123)`        | `foo`
+  | `foo(bar: 123)`             | `foo{bar:}`
+  | `foo(123, baz: 456, 789)`   | `foo{:baz::}`
+
+  It can then be called without labels or coerced to the appropriate `fn` type.
 
 - ...Error messages can get a bit confusing.  I meant "appending to the
   function name" literally.  Like any other Rust procedural macro, this one
@@ -96,7 +102,7 @@ function name**, at both definitions and call sites.  As a natural consequence:
   // In "nightly" mode:
   fn foo{bar:}(bar: u32) {}
   // ^^^^^^^^^ this whole thing is stuffed into an Ident token so it's treated as
-  //           a name, even though it's not a valid ident if written by hand)
+  //           a name, even though it's not a valid ident in vanilla Rust)
   // ditto for the call:
   foo{bar:}(bar: 5);
 
