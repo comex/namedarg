@@ -54,10 +54,8 @@ fn get_tts(an: &Annotatable) -> &[TokenTree] {
             let expr = edef.variants[0].node.disr_expr.as_ref().unwrap();
             if let ExprKind::Mac(ref mac) = expr.node {
                 let tts = &mac.node.tts[..];
-                assert_eq!(tts.len(), 1);
-                if let TokenTree::Delimited(_, ref delimed) = tts[0] {
-                    return &delimed.tts[..];
-                }
+                assert!(tts.len() > 1);
+                return &tts[..tts.len() - 1];
             }
         }
     }
