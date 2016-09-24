@@ -277,6 +277,7 @@ pub enum State {
     ImplDeclAfterGeneric,
     ImplDeclAfterTrait { trait_start: Mark, trait_end: Option<Mark> },
     InTraitOrImpl { trait_start_end: Option<(Mark, Mark)>, prev: Option<&'static VariantData::InTraitOrImpl> },
+    MaybeFuncRef { ident: InIdent },
     ExcessCloses,
     Pop,
 }
@@ -311,6 +312,7 @@ pub enum StateVariant {
     ExcessCloses,
     // dummy
     Pop,
+    MaybeFuncRef,
 }
 
 
@@ -740,6 +742,10 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                         pushx_manual!(StateVariant::CallStart, ident);
                         continue_next!(State::CallArgStart);
                     },
+                    &token::OpenDelim(DelimToken::Brace) => {
+                        delim_depth += 1;
+                        continue_same!(State::MaybeFuncRef { ident: ident });
+                    },
                     _ => {
                         continue_same!(State::Null { expecting_operator: true, after_semi_or_brace: false });
                     },
@@ -753,6 +759,52 @@ pub fn do_transform<'x, 'a: 'x>(tr: &mut TTReader<'a>, ctx: &mut Context<'x>) {
                     },
                     _ => continue_same!(State::Null { expecting_operator: false, after_semi_or_brace: false }),
                 }
+            },
+            State::MaybeFuncRef { ident } => {
+                let open_brace = tr.mark_last();
+                let first = tr.mark_next();
+                st = if let Some(st) = tr.next_no_enter() { st } else {
+                    continue_same!(State::Null { expecting_operator: false, after_semi_or_brace: true });
+                };
+                let first_span = *st.span;
+                let mut bits: Vec<Option<&str>> = Vec::new();
+                let mut last_was_ident = false;
+                let mut had_any_ident = false;
+                loop {
+                    match st.token {
+                        &token::ModSep => {
+                            if !last_was_ident { bits.push(None); }
+                            bits.push(None);
+                            last_was_ident = false;
+                        },
+                        &token::Colon => {
+                            if !last_was_ident { bits.push(None); }
+                            last_was_ident = false;
+                        },
+                        &token::Ident(ref xident) if !last_was_ident => {
+                            bits.push(Some(tr.get_ident_str(tr.last_ii(xident))));
+                            last_was_ident = true;
+                            had_any_ident = true;
+                        },
+                        &token::CloseDelim(_) => {
+                            delim_depth -= 1;
+                            if last_was_ident || !had_any_ident {
+                                // weird
+                                continue_next!(State::Null { expecting_operator: false, after_semi_or_brace: true });
+                            }
+                            let new_name = mutate_name(tr.get_ident_str(ident), &mut bits.into_iter(), ctx);
+                            tr.mutate_ident(ident, new_name);
+                            let next = tr.mark_next();
+                            tr.delete_mark_range(open_brace, next);
+                            continue_next!(State::Null { expecting_operator: true, after_semi_or_brace: false });
+                        },
+                        _ => break,
+                    }
+                    st = if let Some(st) = tr.next_no_enter() { st } else { break };
+                }
+                // not a func ref
+                tr.rewind_to(first, first_span);
+                continue_same!(State::Null { expecting_operator: false, after_semi_or_brace: true });
             },
             State::GotFn => {
                 match st.token {

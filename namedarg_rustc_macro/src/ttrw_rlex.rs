@@ -113,6 +113,9 @@ impl<'a> TTReader<'a> {
         }
 
     }
+    pub fn next_no_enter(&mut self) -> Option<SpanToken<'a>> {
+        self.next()
+    }
     pub fn mark_last(&self) -> Mark {
         unsafe {
             Mark { pos: (*self.storage.get()).span.pos }
@@ -126,6 +129,9 @@ impl<'a> TTReader<'a> {
             start: self.mark_last().pos,
             end: self.lexer.pos(),
         }
+    }
+    pub fn rewind_to(&mut self, _: Mark, span: Span) {
+        self.lexer.rewind_to(span.pos, span.line, span.col);
     }
     pub fn delete_mark_range(&mut self, start: Mark, end: Mark) {
         if start.pos == end.pos { return; }

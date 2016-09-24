@@ -61,6 +61,11 @@ namedarg! {
         assert_eq!(default_func(x: 0, (1, 1)), 5);
         assert_eq!(generic_default_func::<i32>(), 123);
         assert_eq!(test_ref_pattern(a: &1), 1);
+        assert_eq!(named_func{arg:arg2:}(5, 1), 6);
+        let x = right_named_func{:arg2:};
+        assert_eq!(x(1, 2), 3);
+        let y = left_named_func{arg::};
+        assert_eq!(y(1, 2), 3);
     }
 
     #[allow(dead_code)]
@@ -75,6 +80,10 @@ namedarg! {
         fn ignore<T>(_: T) {}
         ignore({struct Y { a: usize } 5});
         ignore(X { a: 5 });
+        let X { a } = X { a: 5 };
+        let _ = a;
+        let t = 1;
+        if 1 == t { { } } // double-open is a special case for MaybeFuncRef
     }
     #[cfg(not(feature = "force_macros11_mode"))]
     #[test]

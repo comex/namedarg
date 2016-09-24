@@ -140,6 +140,12 @@ impl<'a> TTReader<'a> {
         }
     }
     pub fn next(&mut self) -> Option<SpanToken<'a>> {
+        self.next_inner(false)
+    }
+    pub fn next_no_enter(&mut self) -> Option<SpanToken<'a>> {
+        self.next_inner(true)
+    }
+    fn next_inner(&mut self, no_enter: bool) -> Option<SpanToken<'a>> {
         let otok: Option<&'a TokenTree> = self.cur.get(0);
         if let Some(tok) = otok {
             let tok: &'a TokenTree = tok;
@@ -155,6 +161,7 @@ impl<'a> TTReader<'a> {
                     Some(SpanToken { span: span, token: token })
                 },
                 &TokenTree::Delimited(ref span, ref delimed) => {
+                    if no_enter { return None; }
                     let span: &'a Span = span;
                     let delimed: &'a Delimited = delimed;
                     let tts = &delimed.tts[..];
@@ -251,6 +258,16 @@ impl<'a> TTReader<'a> {
     fn check_offset(&self) {}
     fn offset_in_whole(&self) -> usize {
         self.whole.len() - self.cur.len()
+    }
+    // should be same depth and shouldn't have written
+    pub fn rewind_to(&mut self, mark: Mark, _: Span) {
+        self.check_mark(mark);
+        if let Some(ref mut output) = self.output {
+            output.truncate(mark.cur_offset);
+        }
+        let in_offset = self.whole.len() - (self.cur.len() + (self.cur_offset - mark.cur_offset));
+        self.cur = &self.whole[in_offset..];
+        self.cur_offset = mark.cur_offset;
     }
     pub fn delete_mark_range(&mut self, start: Mark, end: Mark) {
         self.check_mark(start);

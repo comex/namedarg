@@ -22,7 +22,6 @@ pub fn idx_before_ending_whitespace_char(s: &[u8]) -> Option<usize> {
     }
 }
 
-
 #[derive(Clone, Copy)]
 struct Reader<'a> {
     data: &'a [u8],
@@ -201,7 +200,7 @@ pub mod token {
     pub use super::BinOp::*;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Copy, Clone)]
 pub struct Lexer<'a> {
     read: Reader<'a>,
     lineno: usize,
@@ -460,5 +459,10 @@ impl<'a> Lexer<'a> {
     #[inline]
     pub fn col(&self) -> usize {
         1 + self.pos() - self.line_start_pos
+    }
+    pub fn rewind_to(&mut self, pos: usize, line: usize, col: usize) {
+        self.read.rewind_to(pos + 1);
+        self.lineno = line;
+        self.line_start_pos = self.pos() - (col - 1);
     }
 }
