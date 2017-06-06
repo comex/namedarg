@@ -77,6 +77,7 @@ function name**, at both definitions and call sites.  As a natural consequence:
 
   To **name** a function with named arguments without calling it, use this
   syntax (loosely inspired by Objective-C):
+  
   | Called as                   | Named as
   | ---                         | ---
   | `foo()` / `foo(123)`        | `foo`
